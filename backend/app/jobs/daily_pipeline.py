@@ -541,16 +541,12 @@ def run_now(
     else:
         skipped.append("sync_index")
 
-    # Step 2.5: 分钟 K 同步(可选) — 未启用或无能力时静默跳过(不 emit)
+    # Step 2.5: 分钟 K 同步(可选) — 未启用或无 capability 时静默跳过(不 emit)
     from app.services import preferences
     minute_on = preferences.get_minute_sync_enabled()
     minute_days = preferences.get_minute_sync_days()
     written_minute = 0
-    # 分钟能力: TickFlow Pro+ (KLINE_MINUTE_BATCH) 或已配置可解析的自定义分钟源
-    # (stock-sdk 等)。与 api/kline._minute_allowed 同口径 —— 否则切了自定义分钟源
-    # 的用户走「立即同步」时分钟阶段仍被 Pro+ 门控跳过, 表现为"分钟K拉不到"。
-    minute_custom = _custom_minute_available()
-    if minute_on and (capset.has(Cap.KLINE_MINUTE_BATCH) or minute_custom):
+    if minute_on and capset.has(Cap.KLINE_MINUTE_BATCH):
         minute_start = today - _td(days=minute_days)
         emit("sync_minute", 90, f"获取分钟K [{minute_start} ~ {today}]…")
         logger.info("sync_minute: [%s ~ %s] start", minute_start, today)
@@ -571,7 +567,7 @@ def run_now(
     else:
         skipped.append("sync_minute")
         if minute_on:
-            logger.info("sync_minute skipped: no KLINE_MINUTE_BATCH capability and no custom minute provider")
+            logger.info("sync_minute skipped: no KLINE_MINUTE_BATCH capability")
         else:
             logger.info("sync_minute skipped: user disabled")
 
@@ -698,22 +694,6 @@ def _refresh_single_view(repo: KlineRepository, name: str) -> None:
         )
     except Exception as e:  # noqa: BLE001
         logger.warning("refresh view %s failed: %s", name, e)
-
-
-def _custom_minute_available() -> bool:
-    """是否配置了可解析的自定义分钟源 (stock-sdk 等)。
-
-    与 api/kline._minute_allowed 同口径: provider 非 tickflow 且已注册、
-    声明 minute 数据集 → True。插件未注册(如装完依赖未重启后端)时返回 False,
-    由调用方走原 Pro+ 门控。
-    """
-    from app.services import preferences as _prefs
-    provider = _prefs.get_minute_data_provider()
-    if provider == "tickflow":
-        return False
-    from app.services import kline_sync as _ks
-    _, fallback, _ = _ks._resolve_minute_provider(provider)
-    return not fallback
 
 
 def _resolve_minute_symbols(capset: CapabilitySet, repo=None) -> list[str]:

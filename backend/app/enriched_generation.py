@@ -23,9 +23,6 @@ _WRITER_LOCKS: dict[tuple[str, str], threading.RLock] = {}
 _ACTIVE_PUBLICATIONS: weakref.WeakValueDictionary[str, EnrichedPublication] = (
     weakref.WeakValueDictionary()
 )
-# Windows 上 os.replace 覆盖被瞬时句柄占用的文件会抛 WinError 5;
-# 短退避重试若干次以跨过 Defender 扫描等瞬时冲突。
-_REPLACE_RETRIES = 5
 
 
 def _marker_path(data_dir: Path, asset_type: str) -> Path:
@@ -262,17 +259,7 @@ class EnrichedPublication:
                 os.fsync(stream.fileno())
             with _exclusive_generation_lock(self.data_dir, self.asset_type):
                 self._claim_or_verify()
-                # Windows: 目标文件可能被瞬时句柄 (Defender 扫描 / 并发读) 短暂占用,
-                # os.replace 抛 WinError 5。短暂退避重试可跨过瞬时冲突; 持续占用
-                # (如其它进程 mmap) 则在重试耗尽后照常失败。
-                for _attempt in range(_REPLACE_RETRIES):
-                    try:
-                        os.replace(temporary, out)
-                        break
-                    except PermissionError:
-                        if _attempt == _REPLACE_RETRIES - 1:
-                            raise
-                        time.sleep(0.4 * (_attempt + 1))
+                os.replace(temporary, out)
                 _fsync_directory(out.parent)
                 self._changed = True
         finally:
