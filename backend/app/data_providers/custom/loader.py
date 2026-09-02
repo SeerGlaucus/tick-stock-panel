@@ -171,20 +171,6 @@ def install_plugin(name: str) -> tuple[bool, str]:
                 text=True,
                 timeout=300,
             )
-            # npm ≥10 的安全校验: 锁文件中 resolved 指向的 registry 与当前配置不一致时
-            # 报 EALLOWREMOTE 拒绝拉取 (供应链防护), 其他镜像瞬时故障也会失败。
-            # 回退: 官方 registry + 跳过锁文件重试一次 (--package-lock=false 让 npm
-            # 忽略旧锁文件的 resolved, 按 --registry 重新解析), 与下方 uv 回退同模式。
-            if result.returncode != 0:
-                logger.warning("npm install 失败, 回退官方 registry 重试: %s", (result.stderr or "").strip().splitlines()[-1] if result.stderr else result.returncode)
-                result = subprocess.run(
-                    [npm, "install", "--omit=dev", "--no-audit", "--no-fund",
-                     "--registry", "https://registry.npmjs.org/", "--package-lock=false"],
-                    cwd=str(pdir),
-                    capture_output=True,
-                    text=True,
-                    timeout=300,
-                )
         elif runtime == "python":
             import sys
             # Python 型插件: 优先用 uv pip install (uv 管理的 venv 无 pip 模块),
