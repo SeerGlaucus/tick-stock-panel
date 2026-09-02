@@ -9,6 +9,6 @@
     "node": ">=18"
   },
   "dependencies": {
-    "stock-sdk": "^2"
+    "stock-sdk": "2.2.2"
   }
 }

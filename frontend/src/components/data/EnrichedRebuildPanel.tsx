@@ -115,7 +115,7 @@ export function EnrichedRebuildPanel({
           }`}>
             {canRebuild
               ? `已检测到 ${historicalShareRows.toLocaleString()} 条历史股本记录。重算会按公告可用日匹配历史流通股本，并覆盖全部 Enriched 分区。`
-              : '未检测到历史股本数据，请先在财务分析页面同步“股本表”，再执行重算。'}
+              : '未检测到历史股本数据，换手率重算不可用。若当前财务数据源支持股本表，请先在财务分析页面同步「股本表」；不提供股本表的数据源无法启用此功能，历史换手率将回退最新维表股本。'}
           </div>
         )}
         <div className="text-[10px] text-muted mb-2">

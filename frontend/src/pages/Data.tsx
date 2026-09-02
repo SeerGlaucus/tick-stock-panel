@@ -43,6 +43,7 @@ import { ScheduleEditor } from '@/components/data/ScheduleEditor'
 import { ExtendHistoryPanel } from '@/components/data/ExtendHistoryPanel'
 import { RepairDailyPanel } from '@/components/data/RepairDailyPanel'
 import { EnrichedRebuildPanel } from '@/components/data/EnrichedRebuildPanel'
+import { FinancialSyncPanel } from '@/components/data/FinancialSyncPanel'
 import { MinuteSyncConfig } from '@/components/data/MinuteSyncConfig'
 import { RegimeConfigCard } from '@/components/data/RegimeConfigCard'
 import { PipelineScopeConfig } from '@/components/data/PipelineScopeConfig'
@@ -1008,7 +1009,8 @@ export function Data() {
 
       <AnimatePresence>
         {openSettings === 'financials' && (
-          <SettingsModal title="财务数据 · 换手率重算" onClose={() => setOpenSettings(null)}>
+          <SettingsModal title="财务数据 · 同步与换手率重算" onClose={() => setOpenSettings(null)}>
+            <FinancialSyncPanel />
             <EnrichedRebuildPanel
               isRunning={!!activeJobId}
               purpose="turnover"

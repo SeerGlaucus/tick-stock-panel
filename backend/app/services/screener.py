@@ -411,14 +411,6 @@ class ScreenerService:
         d = self.repo.enriched_latest_date()
         if d:
             return d
-        # 回退 DuckDB
-        try:
-            res = self.repo.execute_one(
-                "SELECT max(date) FROM kline_enriched",
-            )
-            if res and res[0]:
-                d = res[0]
-                return d if isinstance(d, date) else date.fromisoformat(str(d))
-        except Exception:  # noqa: BLE001
-            return None
-        return None
+        # 回退目录列举 (不用 DuckDB 视图: read_parquet + union_by_name 在 Windows
+        # 上会保留 glob 首个 parquet 的句柄, 阻塞后续全量重建落盘)。
+        return self.repo.latest_enriched_date("stock")

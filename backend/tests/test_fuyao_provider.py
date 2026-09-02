@@ -6,6 +6,9 @@
 """
 from __future__ import annotations
 
+from datetime import date as _date
+from datetime import datetime, timedelta
+
 import pytest
 
 from app.plugins.fuyao import client as fc
@@ -14,14 +17,31 @@ from app.plugins.fuyao.provider import FuyaoProvider
 
 
 class _FakeClient:
-    """按调用次数返回预置页, 记录调用供分页断言。snapshot_all 同真实客户端语义。"""
+    """按调用次数返回预置页, 记录调用供分页断言。snapshot_all 同真实客户端语义。
 
-    def __init__(self, pages: list[list[dict]], count: int, error: Exception | None = None, server_ts: int = 0):
+    同时承载 daily/adj_factor/financial 的桩:
+      - historical_rows / adj_events: historical() 与 adjustment_factors() 固定返回
+      - financial_rows: {table: rows} 固定返回; indicators 支持 dict {report: abilities}
+      - indicator_errors: {report: Exception} 按报告期注入错误 (模拟 3002 未就绪)
+    均可注入全局 error 模拟失败。
+    """
+
+    def __init__(self, pages: list[list[dict]], count: int, error: Exception | None = None,
+                 server_ts: int = 0, historical_rows: list[dict] | None = None,
+                 adj_events: list[dict] | None = None, financial_rows: dict | None = None,
+                 indicator_errors: dict | None = None):
         self.pages = pages
         self.count = count
         self.error = error
         self.server_ts = server_ts
+        self.historical_rows = historical_rows or []
+        self.adj_events = adj_events or []
+        self.financial_rows = financial_rows or {}
+        self.indicator_errors = indicator_errors or {}
         self.calls: list[dict] = []
+        self.historical_calls: list[dict] = []
+        self.adj_calls: list[dict] = []
+        self.financial_calls: list = []
         self.last_server_ts = server_ts
 
     def snapshot_page(self, limit=500, offset=0):
@@ -49,6 +69,50 @@ class _FakeClient:
         if not out:
             raise fc.FuyaoError("全市场快照为空")
         return out, self.server_ts
+
+    def historical(self, thscode, start_ms, end_ms, adjust="none"):
+        self.historical_calls.append({
+            "thscode": thscode, "start_ms": start_ms, "end_ms": end_ms, "adjust": adjust,
+        })
+        if self.error:
+            raise self.error
+        return list(self.historical_rows)
+
+    def adjustment_factors(self, thscode, from_date=None, to_date=None):
+        self.adj_calls.append({"thscode": thscode, "from": from_date, "to": to_date})
+        if self.error:
+            raise self.error
+        return list(self.adj_events)
+
+    def income_statements(self, thscode, period="quarterly", limit=4):
+        self.financial_calls.append(("income", thscode, period, limit))
+        if self.error:
+            raise self.error
+        return list(self.financial_rows.get("income", []))
+
+    def balance_sheets(self, thscode, period="quarterly", limit=4):
+        self.financial_calls.append(("balance_sheet", thscode, period, limit))
+        if self.error:
+            raise self.error
+        return list(self.financial_rows.get("balance_sheet", []))
+
+    def cash_flow_statements(self, thscode, period="quarterly", limit=4):
+        self.financial_calls.append(("cash_flow", thscode, period, limit))
+        if self.error:
+            raise self.error
+        return list(self.financial_rows.get("cash_flow", []))
+
+    def financial_indicators(self, thscode, report):
+        self.financial_calls.append(("indicators", thscode, report))
+        if self.error:
+            raise self.error
+        err = self.indicator_errors.get(report)
+        if err:
+            raise err
+        rows = self.financial_rows.get("indicators")
+        if isinstance(rows, dict):
+            return list(rows.get(report, []))
+        return list(rows or [])
 
     def close(self):
         pass
@@ -236,13 +300,14 @@ def test_client_requires_api_key():
 
 # ---- 能力声明与注册 ----
 
-def test_datasets_declaration_realtime_only():
-    """只声明 realtime; 其他数据集 provider_has_dataset 必须为 False (回退 tickflow)。"""
+def test_datasets_declaration():
+    """声明 realtime/daily/adj_factor/financial; 未接入的 minute 必须为 False (回退 tickflow)。"""
     config = FuyaoProvider().config
     assert "realtime" in config.datasets
-    assert "daily" not in config.datasets
+    assert "daily" in config.datasets
+    assert "adj_factor" in config.datasets
+    assert "financial" in config.datasets
     assert "minute" not in config.datasets
-    assert "financial" not in config.datasets
 
 
 # ---- API Key 解析 (secrets.json > .env, 对齐 tickflow 语义) ----
@@ -368,14 +433,28 @@ def test_manifest_declares_realtime_dataset():
     assert manifest.get("api_key_env") == fp.API_KEY_ENV
 
 
-def test_hidden_plugin_not_registered():
-    """hidden: true 的插件不注册、不在数据源页展示 (优化完成前隐藏 fuyao)。"""
+def test_manifest_visible_and_declares_datasets():
+    """扶摇当前为可见插件: hidden=False, 声明 realtime/daily/adj_factor/financial (未声明 minute)。"""
     from app.data_providers.custom import loader
     manifest = loader.plugin_manifest("fuyao")
-    assert manifest.get("hidden") is True
+    assert manifest is not None
+    assert manifest.get("hidden") is False
+    assert set(manifest.get("datasets") or []) == {"realtime", "daily", "adj_factor", "financial"}
+
+
+def test_hidden_plugin_not_registered():
+    """hidden: true 的插件不注册、不在数据源页展示 (机制测试, 用合成清单避免依赖 fuyao 当前清单)。"""
+    from app.data_providers.custom import loader
+    manifest = {
+        "name": "synthetic_hidden",
+        "entry": "app.plugins.fuyao.provider:FuyaoProvider",
+        "runtime": "none",
+        "hidden": True,
+        "check": "app.plugins.fuyao.provider:availability",
+    }
     loader._register_one_plugin(manifest)
-    assert "fuyao" not in loader._PLUGIN_STATUS
-    assert "fuyao" not in loader._PROVIDERS
+    assert "synthetic_hidden" not in loader._PLUGIN_STATUS
+    assert "synthetic_hidden" not in loader._PROVIDERS
 
 
 # ---- 设置页试拉 ----
@@ -399,3 +478,352 @@ def test_close_is_idempotent(monkeypatch):
     provider, _ = _provider_with(monkeypatch, [[_row()]])
     provider.close()
     provider.close()
+
+
+# ---- 时间辅助 (显式北京时间, §3.3) ----
+
+def test_sh_date_beijing_midnight():
+    """date_ms 为 Asia/Shanghai 零点 (实测 1469980800000 = 2016-08-01), 不得按 UTC 取日。"""
+    assert fp._sh_date(1469980800000) == _date(2016, 8, 1)
+
+
+def test_to_ms_explicit_beijing_tz():
+    """naive datetime 按 Asia/Shanghai 解释, 不依赖服务器时区。"""
+    assert fp._to_ms(datetime(2016, 8, 1)) == 1469980800000
+    assert fp._to_ms(_date(2016, 8, 1)) == 1469980800000
+    assert fp._to_ms(None) is None
+
+
+def test_slice_range_caps_at_10y():
+    """窗口 > 上限时切片; 端点 10 年窗口限制由客户端自动规避。"""
+    day_ms = 24 * 3600 * 1000
+    start = fp._to_ms(datetime(2016, 1, 1))
+    end = fp._to_ms(datetime(2026, 1, 1))
+    windows = list(fc._slice_range(start, end))
+    assert len(windows) == 2
+    for s, e in windows:
+        assert (e - s) // day_ms <= fc._HISTORICAL_MAX_RANGE_DAYS
+    # 切片连续无缝隙 (cur = nxt + 1ms)
+    assert windows[1][0] == windows[0][1] + 1
+    # 短窗口不切片
+    assert list(fc._slice_range(start, start + 30 * day_ms)) == [(start, start + 30 * day_ms)]
+
+
+# ---- daily ----
+
+def _bar(date_ms: int, close: float, **over):
+    bar = {
+        "date_ms": date_ms,
+        "open_price": close,
+        "high_price": close * 1.01,
+        "low_price": close * 0.99,
+        "close_price": close,
+        "volume": 1000000.0,
+        "turnover": close * 1000000.0,
+    }
+    bar.update(over)
+    return bar
+
+
+def test_daily_maps_fields_and_beijing_date(monkeypatch):
+    """date_ms(上海零点) → date; open/high/low/close/volume/amount 直通 (单位与内部契约一致)。"""
+    provider, fake = _provider_with(
+        monkeypatch, [[]],
+        historical_rows=[_bar(1469980800000, 100.0)],  # 2016-08-01 00:00 +08:00
+    )
+    df = provider.get_daily(["600519.SH"], None, None)
+    assert df.height == 1
+    row = df.to_dicts()[0]
+    assert row["symbol"] == "600519.SH"
+    assert row["date"] == _date(2016, 8, 1)
+    assert row["open"] == 100.0 and row["high"] == 101.0
+    assert row["low"] == 99.0 and row["close"] == 100.0
+    assert row["volume"] == 1000000.0 and row["amount"] == 100000000.0
+    # 原始价请求: 前复权交给 enriched 管道自算, 不落库 adjust=forward (§3.2)
+    assert fake.historical_calls[0]["adjust"] == "none"
+    assert fake.historical_calls[0]["thscode"] == "600519.SH"
+
+
+def test_daily_batches_symbols_and_merges(monkeypatch):
+    provider, fake = _provider_with(
+        monkeypatch, [[]],
+        historical_rows=[_bar(1469980800000, 100.0)],
+    )
+    df = provider.get_daily(["600519.SH", "000001.SZ"], None, None)
+    assert df.height == 2
+    assert set(df["symbol"].to_list()) == {"600519.SH", "000001.SZ"}
+    assert len(fake.historical_calls) == 2
+    assert len({c["start_ms"] for c in fake.historical_calls}) == 1  # 同一窗口
+
+
+def test_daily_empty_and_error_soft_fail(monkeypatch):
+    provider, _ = _provider_with(monkeypatch, [[]], historical_rows=[])
+    assert provider.get_daily([], None, None).is_empty()
+    provider_err, _ = _provider_with(monkeypatch, [[]], error=fc.FuyaoError("扶摇接口错误 code=4001: 频率超限"))
+    assert provider_err.get_daily(["600519.SH"], None, None).is_empty()
+
+
+def test_daily_default_window_is_one_year(monkeypatch):
+    provider, fake = _provider_with(monkeypatch, [[]], historical_rows=[_bar(1469980800000, 100.0)])
+    provider.get_daily(["600519.SH"], None, None)
+    (start_ms, end_ms) = fake.historical_calls[0]["start_ms"], fake.historical_calls[0]["end_ms"]
+    assert (end_ms - start_ms) == 365 * 24 * 3600 * 1000
+
+
+def test_test_dataset_daily_preview(monkeypatch):
+    provider, _ = _provider_with(monkeypatch, [[]], historical_rows=[_bar(1469980800000, 100.0)])
+    out = provider.test_dataset("daily")
+    assert out["dataset"] == "daily" and out["rows"] == 1
+    assert out["columns"][0] == "symbol"
+
+
+# ---- adj_factor ----
+
+def _event(ex_date: datetime, dividend: float = 0.0, bonus: float = 0.0) -> dict:
+    return {
+        "ex_date_ms": fp._to_ms(ex_date),
+        "dividend_per_share": dividend,
+        "per_share_bonus": bonus,
+    }
+
+
+def _adj_provider(monkeypatch, events, bars):
+    return _provider_with(monkeypatch, [[]], adj_events=events, historical_rows=bars)
+
+
+def test_adj_factor_cash_dividend_uses_prior_close(monkeypatch):
+    """纯现金分红: ex_factor = C/(C-d), C=除权日前一交易日收盘。"""
+    ex = datetime(2026, 6, 26)
+    bars = [
+        _bar(fp._to_ms(datetime(2026, 6, 24)), 1713.71),
+        _bar(fp._to_ms(datetime(2026, 6, 25)), 1700.0),   # 前收盘
+        _bar(fp._to_ms(datetime(2026, 6, 26)), 1680.0),   # 除权日
+    ]
+    provider, fake = _adj_provider(monkeypatch, [_event(ex, dividend=25.911)], bars)
+    df = provider.get_adj_factors(["600519.SH"], None, None)
+    assert df.height == 1
+    row = df.to_dicts()[0]
+    assert row["trade_date"] == ex.date()
+    assert row["ex_factor"] == pytest.approx(1700.0 / (1700.0 - 25.911))
+    # 前收盘窗口: 最早事件前 _PRIOR_CLOSE_MARGIN_DAYS 天起
+    margin = fp._PRIOR_CLOSE_MARGIN_DAYS
+    assert fake.historical_calls[0]["start_ms"] == fp._to_ms(datetime(2026, 6, 26) - timedelta(days=margin))
+    assert fake.historical_calls[0]["end_ms"] == fp._to_ms(datetime(2026, 6, 26))
+
+
+def test_adj_factor_bonus_ratio_exact(monkeypatch):
+    """纯送股 10送5 (b=0.5): ex_factor 精确等于 1.5 (test_price_limits 同口径)。"""
+    ex = datetime(2026, 6, 26)
+    bars = [
+        _bar(fp._to_ms(datetime(2026, 6, 25)), 10.0),
+        _bar(fp._to_ms(datetime(2026, 6, 26)), 6.67),
+    ]
+    provider, _ = _adj_provider(monkeypatch, [_event(ex, bonus=0.5)], bars)
+    df = provider.get_adj_factors(["600519.SH"], None, None)
+    assert df.to_dicts()[0]["ex_factor"] == pytest.approx(1.5)
+
+
+def test_adj_factor_combined_dividend_and_bonus(monkeypatch):
+    """现金分红 + 送股: C(1+b)/(C-d)。"""
+    ex = datetime(2026, 6, 26)
+    bars = [
+        _bar(fp._to_ms(datetime(2026, 6, 25)), 10.0),
+        _bar(fp._to_ms(datetime(2026, 6, 26)), 6.0),
+    ]
+    provider, _ = _adj_provider(monkeypatch, [_event(ex, dividend=2.0, bonus=0.1)], bars)
+    df = provider.get_adj_factors(["600519.SH"], None, None)
+    assert df.to_dicts()[0]["ex_factor"] == pytest.approx(10.0 * 1.1 / (10.0 - 2.0))
+
+
+def test_adj_factor_skips_when_prior_close_missing(monkeypatch):
+    """前收盘不可得 (事件早于可用日K) → fail-closed 跳过, 不伪造因子。"""
+    ex = datetime(2001, 8, 27)  # 早于所有 bar
+    bars = [_bar(fp._to_ms(datetime(2005, 1, 4)), 10.0)]
+    provider, _ = _adj_provider(monkeypatch, [_event(ex, dividend=1.0)], bars)
+    df = provider.get_adj_factors(["600519.SH"], None, None)
+    assert df.is_empty()
+
+
+def test_adj_factor_empty_events_and_error(monkeypatch):
+    provider, _ = _adj_provider(monkeypatch, [], [])
+    assert provider.get_adj_factors(["600519.SH"], None, None).is_empty()
+    provider_err, _ = _provider_with(monkeypatch, [[]], error=fc.FuyaoError("code=3002 数据尚未准备"))
+    assert provider_err.get_adj_factors(["600519.SH"], None, None).is_empty()
+
+
+def test_adj_factor_incremental_passes_from_to(monkeypatch):
+    """增量同步: start/end → 事件流 from/to 过滤; 前收盘窗口自带回看余量不受 from 影响。"""
+    ex = datetime(2026, 6, 26)
+    bars = [
+        _bar(fp._to_ms(datetime(2026, 6, 25)), 1700.0),
+        _bar(fp._to_ms(datetime(2026, 6, 26)), 1680.0),
+    ]
+    provider, fake = _adj_provider(monkeypatch, [_event(ex, dividend=25.911)], bars)
+    provider.get_adj_factors(
+        ["600519.SH"],
+        start_time=datetime(2026, 6, 1),
+        end_time=datetime(2026, 6, 30),
+    )
+    assert fake.adj_calls[0]["from"] == "2026-06-01"
+    assert fake.adj_calls[0]["to"] == "2026-06-30"
+    # 前收盘窗口起点 = 最早事件前 60 天, 早于 from (2026-06-01) → 能取到 2026-06-25 收盘
+    assert fake.historical_calls[0]["start_ms"] < fp._to_ms(datetime(2026, 6, 1))
+
+
+def test_test_dataset_adj_factor_preview(monkeypatch):
+    ex = datetime(2026, 6, 26)
+    bars = [
+        _bar(fp._to_ms(datetime(2026, 6, 25)), 1700.0),
+        _bar(fp._to_ms(datetime(2026, 6, 26)), 1680.0),
+    ]
+    provider, _ = _adj_provider(monkeypatch, [_event(ex, dividend=25.911)], bars)
+    out = provider.test_dataset("adj_factor")
+    assert out["dataset"] == "adj_factor" and out["rows"] == 1
+    assert out["preview"][0]["ex_factor"] > 1.0
+
+
+# ---- financial ----
+
+def _abilities(*pairs):
+    """构造 abilities 数组: [(index_id, value), ...] → 单个 growth 块。"""
+    return [{"ability": "growth", "indicators": [{"index_id": i, "value": str(v)} for i, v in pairs]}]
+
+
+def test_financial_income_maps_period_end_and_drops_report_date(monkeypatch):
+    """period_end_ms(上海零点) → period_end; report_date_ms(数据刷新日) 剔除不落库。"""
+    row = {
+        "thscode": "600519.SH", "ticker": "600519", "period": "quarterly", "fiscal_year": 2025,
+        "fiscal_period": "FY", "currency": "CNY",
+        "period_end_ms": 1767110400000,  # 2025-12-31 00:00 +08:00 (实测)
+        "report_date_ms": 1776355200000,  # 数据刷新日, 非公告日
+        "operating_income": 168838102514.79, "net_profit": 85310324833.67, "basic_eps": 65.66,
+    }
+    provider, fake = _provider_with(monkeypatch, [[]], financial_rows={"income": [row]})
+    df = provider.get_financials("income", ["600519.SH"], latest_only=True)
+    assert df.height == 1
+    r = df.to_dicts()[0]
+    assert r["symbol"] == "600519.SH"
+    assert r["period_end"] == _date(2025, 12, 31)
+    assert r["operating_income"] == pytest.approx(168838102514.79)
+    assert r["basic_eps"] == pytest.approx(65.66)
+    assert "report_date_ms" not in r and "currency" not in r
+    # latest_only=True → limit=4
+    assert fake.financial_calls == [("income", "600519.SH", "quarterly", 4)]
+
+
+def test_financial_statements_full_history_uses_12_periods(monkeypatch):
+    b = {"thscode": "600519.SH", "period_end_ms": 1767110400000, "assets_total": 1.0, "total_debt": 0.2}
+    c = {"thscode": "600519.SH", "period_end_ms": 1767110400000, "act_cash_flow_net": 5.0}
+    provider, fake = _provider_with(
+        monkeypatch, [[]], financial_rows={"balance_sheet": [b], "cash_flow": [c]},
+    )
+    dfb = provider.get_financials("balance_sheet", ["600519.SH"], latest_only=False)
+    dfc = provider.get_financials("cash_flow", ["600519.SH"], latest_only=False)
+    assert dfb.to_dicts()[0]["assets_total"] == pytest.approx(1.0)
+    assert dfc.to_dicts()[0]["act_cash_flow_net"] == pytest.approx(5.0)
+    # latest_only=False → limit=12
+    assert fake.financial_calls == [
+        ("balance_sheet", "600519.SH", "quarterly", 12),
+        ("cash_flow", "600519.SH", "quarterly", 12),
+    ]
+
+
+def test_financial_metrics_maps_indicators(monkeypatch):
+    """index_id → 内部列; period_end 按报告期; announce_date 取法定披露截止日; bps 恒 null。"""
+    abilities = _abilities(
+        ("calculate_operating_income_yoy_growth_ratio", 15.71),
+        ("calculate_parent_holder_net_profit_yoy_growth_ratio", 15.38),
+        ("sale_gross_margin", 91.93),
+        ("sale_net_interest_ratio", 52.27),
+        ("index_weighted_avg_roe", 36.02),
+        ("assets_debt_ratio", 19.04),
+    )
+    provider, fake = _provider_with(monkeypatch, [[]], financial_rows={"indicators": abilities})
+    df = provider.get_financials("metrics", ["600519.SH"], latest_only=True)
+    assert df.height == 4  # latest_only → 4 期
+    r = df.sort("period_end").to_dicts()[-1]
+    assert r["revenue_yoy"] == pytest.approx(15.71)
+    assert r["net_income_yoy"] == pytest.approx(15.38)
+    assert r["gross_margin"] == pytest.approx(91.93)
+    assert r["net_margin"] == pytest.approx(52.27)
+    assert r["roe"] == pytest.approx(36.02)
+    assert r["debt_to_asset_ratio"] == pytest.approx(19.04)
+    assert r["bps"] is None  # fuyao 无 bps → pb 因子全 null, 其余因子可用
+    # 报告期从最近已结束季度向前回走 (静态桩: 每期都返回同样数据)
+    assert len([c for c in fake.financial_calls if c[0] == "indicators"]) == 4
+
+
+def test_financial_metrics_announce_deadline():
+    """保守公告日: 年报 次年4/30, 中报 8/31, 季报 4/30 与 10/31 (用户已确认方案)。"""
+    abilities = _abilities(("calculate_operating_income_yoy_growth_ratio", 15.71))
+    r4 = fp._metrics_row("600519.SH", "2025-4", abilities)
+    assert r4["period_end"] == _date(2025, 12, 31)
+    assert r4["announce_date"] == _date(2026, 4, 30)
+    r1 = fp._metrics_row("600519.SH", "2026-1", abilities)
+    assert r1["period_end"] == _date(2026, 3, 31) and r1["announce_date"] == _date(2026, 4, 30)
+    r2 = fp._metrics_row("600519.SH", "2026-2", abilities)
+    assert r2["period_end"] == _date(2026, 6, 30) and r2["announce_date"] == _date(2026, 8, 31)
+    r3 = fp._metrics_row("600519.SH", "2026-3", abilities)
+    assert r3["period_end"] == _date(2026, 9, 30) and r3["announce_date"] == _date(2026, 10, 31)
+
+
+def test_financial_metrics_walk_skips_unready_report(monkeypatch):
+    """code=3002 未就绪报告期 → 继续向前回走, 不中断整批。"""
+    abilities = _abilities(("calculate_operating_income_yoy_growth_ratio", 15.71))
+    latest = fp._latest_ended_report()
+    year, quarter = latest
+    # 最近期(3002 未就绪)之外的所有报告期都有数据
+    report_data: dict[str, list] = {}
+    r = (year, quarter)
+    for _ in range(8):
+        r = fp._prev_report(*r)
+        report_data[f"{r[0]}-{r[1]}"] = abilities
+    provider, fake = _provider_with(
+        monkeypatch, [[]],
+        financial_rows={"indicators": report_data},
+        indicator_errors={f"{year}-{quarter}": fc.FuyaoError("code=3002 数据尚未准备", code=3002)},
+    )
+    df = provider.get_financials("metrics", ["600519.SH"], latest_only=True)
+    assert df.height == 4  # 跳过未就绪期后仍取满 4 期
+    calls = [c for c in fake.financial_calls if c[0] == "indicators"]
+    assert calls[0][2] == f"{year}-{quarter}"  # 先尝试最近期
+    assert calls[1][2] == f"{fp._prev_report(year, quarter)[0]}-{fp._prev_report(year, quarter)[1]}"  # 未就绪 → 往前一期
+
+
+def test_financial_metrics_hard_error_stops_walk(monkeypatch):
+    """非 3002 硬错误 → 停止回走并返回已收集数据 (fail-closed)。"""
+    abilities = _abilities(("calculate_operating_income_yoy_growth_ratio", 15.71))
+    latest = fp._latest_ended_report()
+    provider, fake = _provider_with(
+        monkeypatch, [[]],
+        financial_rows={"indicators": abilities},
+        indicator_errors={f"{latest[0]}-{latest[1]}": fc.FuyaoError("code=4001 限流", code=4001)},
+    )
+    df = provider.get_financials("metrics", ["600519.SH"], latest_only=True)
+    assert df.is_empty()
+    # 4001 为可重试错误 → 指数退避重试 3 次后停止 (fail-closed)
+    assert len([c for c in fake.financial_calls if c[0] == "indicators"]) == 3
+
+
+def test_financial_shares_unsupported_and_unknown_table(monkeypatch):
+    """shares 表扶摇不提供 → 空表 (下游回退最新维表股本); 未知表同样空表。"""
+    provider, fake = _provider_with(monkeypatch, [[]])
+    assert provider.get_financials("shares", ["600519.SH"]).is_empty()
+    assert provider.get_financials("no_such_table", ["600519.SH"]).is_empty()
+    assert fake.financial_calls == []
+
+
+def test_financial_error_soft_fail(monkeypatch):
+    """整批软失败: 返回空表, 不抛异常 (financial_sync 按空数据处理)。"""
+    provider, _ = _provider_with(monkeypatch, [[]], error=fc.FuyaoError("code=4001 限流", code=4001))
+    assert provider.get_financials("income", ["600519.SH"]).is_empty()
+    assert provider.get_financials("metrics", ["600519.SH"]).is_empty()
+
+
+def test_test_dataset_financial_preview(monkeypatch):
+    abilities = _abilities(("calculate_operating_income_yoy_growth_ratio", 15.71))
+    provider, _ = _provider_with(monkeypatch, [[]], financial_rows={"indicators": abilities})
+    out = provider.test_dataset("financial")
+    assert out["dataset"] == "financial" and out["rows"] == 4
+    assert "revenue_yoy" in out["columns"]
+    assert "announce_date" in out["columns"]

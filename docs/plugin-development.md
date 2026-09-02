@@ -121,11 +121,25 @@ class MyConfig:
 ## 现有插件参考
 
 - **`backend/app/plugins/fuyao/`** — 同花顺官方 REST 数据源(runtime: none, 纯 HTTP 零依赖)
-  - 当前提供 `realtime`(A 股全市场快照, 分页拉取); Key 在设置页卡片直接配置(先探后存), 或 `.env` 配 `FUYAO_API_KEY`
-  - `client.py` — httpx 客户端(X-api-key 认证 + 统一信封解包 + 分页)
-  - `provider.py` — Provider 实现(字段映射、百分数→小数制单位转换、软失败、Key 探测)
+  - 当前提供 `realtime`(A 股全市场快照, 分页拉取)、`daily`(日K 原始价, 单标的 ≤10 年窗口自动切片)、`adj_factor`(复权事件流 → 每股事件 pre/post 比值推导)、`financial`(利润表/资产负债表/现金流量表 + 财务指标; **无历史股本表 shares**); Key 在设置页卡片直接配置(先探后存), 或 `.env` 配 `FUYAO_API_KEY`
+  - `client.py` — httpx 客户端(X-api-key 认证 + 统一信封解包 + 快照分页 + 历史K 窗口切片/去重 + 财务端点)
+  - `provider.py` — Provider 实现(字段映射、百分数→小数制单位转换、复权事件流推导 ex_factor、财务指标 index_id 映射、软失败、Key 探测)
   - 单位口径注意: 扶摇 `price_change_ratio_pct` 为百分数数值(1.74 = +1.74%),
     内部 `change_pct` 契约为小数制, provider 内显式 / 100(见 CONTRIBUTING §3.1)
+  - 复权口径注意: 日K 取 `adjust=none` 原始价, 前复权由 enriched 管道用 ex_factor 自算
+    (CONTRIBUTING §3.2); 扶摇 `adjust=forward` 序列为「累计分红扣除」式算法, 与项目乘法
+    累积因子口径不一致, 不得落库。`ex_factor = C(1+b)/(C-d)` 为每股事件 pre/post 比值
+    (C=除权日前收盘, 来自同源日K), REST 事件流不含配股字段, 含配股事件跳过(fail-closed)
+  - 财务口径注意: fuyao 不提供真实公告日(`report_date_ms` 为数据刷新日, 不可作公告日),
+    metrics 表 `announce_date` 取**法定披露截止日**(年报 4/30、中报 8/31、季报 4/30/10/31,
+    保守无未来函数, 用户已确认); 无 `bps` 指标 → pb 因子恒 null, 其余 6 个财务因子可用;
+    `shares` 表不提供 → 空表, 下游按 §3.4 回退最新维表股本; 财务端点为单标的 REST,
+    全市场全量同步耗时长, 建议数据页手动触发后台同步
+- **`backend/app/plugins/akshare/`** — AKShare 免费数据源(runtime: python, 需 `pip install akshare`)
+  - 上游全部为新浪财经/巨潮资讯/沪深京交易所官网(本网络实测可达; 东财系接口在部分网络被阻断, 本插件不依赖)
+  - 提供 `daily`(新浪日K 全历史, 不复权)、`adj_factor`(新浪 qfq/raw 收盘比值法 → 每股事件 pre/post 比值, 容差 1e-4 实测无漏检)、`minute`(新浪 1/5/15/30/60 分钟, 近 ~8 交易日)、`realtime`(全市场 5550 只单请求)、`financial`(新浪三表+关键指标 1998 至今, 巨潮历史股本; **三表与股本表带真实公告日**, 关键指标用保守法定披露日)、`instruments`(交易所代码表)
+  - 稳定性: `_call_with_retry` 指数退避重试(0.6/1.2/2.4s) + `_REQUEST_INTERVAL_S=0.35` 请求间隔(新浪文档明示易封 IP) + 单标的软失败
+  - 口径注意: spot 涨跌幅百分数 → change_pct 小数制 /100; shares `已流通股份` 万股 → 股 (×10000); minute 无日期窗口参数, 由调用方按 datetime 去重
 - **`backend/app/plugins/stocksdk/`** — Node 型插件, 通过 subprocess 桥接调用 stock-sdk
   - `bridge.py` — Python↔Node 桥接 + availability 检测
   - `bridge.mjs` — Node 端(并发池、重试、SDK 解析)

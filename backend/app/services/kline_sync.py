@@ -24,6 +24,10 @@ from app.tickflow.repository import KlineRepository
 
 logger = logging.getLogger(__name__)
 
+# 自定义日K源 (fuyao/akshare 等逐标的 REST) 同步的分块大小: 每块拉完即落盘,
+# 避免全市场全量攒内存/中断丢数据。块内 provider 再按自身小批处理。
+_DAILY_CUSTOM_CHUNK = 200
+
 
 def _atomic_write_parquet(df: pl.DataFrame, out) -> None:
     """先写临时文件再原子替换, 避免进程中断留下损坏的 parquet。
@@ -177,24 +181,39 @@ def sync_and_persist_daily_batch(
             end_time = end_date or datetime.now()
             days = count or 365
             start_time = start_date or (end_time - timedelta(days=days))
-            df = provider.get_daily(
-                symbols,
-                start_time=start_time,
-                end_time=end_time,
-                on_chunk_done=on_chunk_done,
-            )
-            if df.is_empty():
+            # 分块拉取 + 逐块落盘 (对齐分钟路径的流式语义): 进度可见、中断不丢、
+            # 内存有界。自定义源多为逐标的 REST (fuyao/akshare), 全量一次拉完再写
+            # 会导致同步期间数据页恒为 0 行, 且中途失败全部丢失。
+            total_written = 0
+            for idx, chunk in enumerate(chunked(symbols, _DAILY_CUSTOM_CHUNK)):
+                if on_chunk_done is not None:
+                    total = (len(symbols) + _DAILY_CUSTOM_CHUNK - 1) // _DAILY_CUSTOM_CHUNK
+                    # 包装: provider 内部按小批回调 (cur,total), 这里上报外层块进度
+                    def _cb(_cur, _tot, _idx=idx, _total=total):
+                        on_chunk_done(_idx + 1, _total)
+                else:
+                    _cb = None
+                df = provider.get_daily(
+                    chunk,
+                    start_time=start_time,
+                    end_time=end_time,
+                    on_chunk_done=_cb,
+                )
+                if df.is_empty():
+                    continue
+                repo.append_daily(df)
+                total_written += df.height
+            if total_written == 0:
                 return 0
-            repo.append_daily(df)
             try:
                 d = repo.store.data_dir.as_posix()
                 repo.db.execute(
                     f"""CREATE OR REPLACE VIEW kline_daily AS
                         SELECT * FROM read_parquet('{d}/kline_daily/**/*.parquet', union_by_name=true)"""
                 )
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.warning("refresh view failed: %s", e)
-            return df.height
+            return total_written
         # 自定义源未配置 daily → 回退 TickFlow
 
     if not capset.has(Cap.KLINE_DAILY_BATCH):

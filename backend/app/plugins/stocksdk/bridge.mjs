@@ -182,6 +182,43 @@ async function opAdj(sdk, job) {
   return out
 }
 
+/** 上游(东财/腾讯)分钟接口在部分网络被阻断时, 回退到新浪 1 分钟 K 线接口。
+ *  实测 (2026-08): 东财 push2his 与本机断连、腾讯 mkline 连接被重置, 而新浪
+ *  quotes.sina.cn 可用, 返回真实 1 分钟行情。
+ *  新浪 getKLineData 不支持日期窗口, 只返回最近 datalen 根 (实测上限 1023,
+ *  ≈4.3 个交易日); start/end 被忽略, 由调用方按 datetime 去重/截取。
+ *  返回行: date("YYYY-MM-DD HH:MM") / open/high/low/close/volume/amount,
+ *  与 provider._minute_df 的 date 解析路径兼容 (北京时间墙钟)。 */
+const SINA_MINUTE_URL = 'https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData'
+const SINA_SCALE = { '1': 1, '5': 5, '15': 15, '30': 30, '60': 60 }
+
+async function fetchSinaMinute(sym, period = '1') {
+  const m = /^(\d{6})\.(SH|SZ|BJ)$/i.exec(String(sym || ''))
+  if (!m) return []
+  const code = m[2].toLowerCase() + m[1]
+  const scale = SINA_SCALE[String(period)] || 1
+  const url = `${SINA_MINUTE_URL}?symbol=${code}&scale=${scale}&ma=no&datalen=1023`
+  try {
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0', Referer: 'https://finance.sina.com.cn' },
+      signal: AbortSignal.timeout(15000),
+    })
+    if (!resp.ok) return []
+    const data = await resp.json()
+    if (!Array.isArray(data)) return []
+    return data
+      .map((b) => ({
+        date: String(b && b.day || '').slice(0, 16),  // "2026-08-28 14:49"
+        open: Number(b && b.open), high: Number(b && b.high),
+        low: Number(b && b.low), close: Number(b && b.close),
+        volume: Number(b && b.volume), amount: Number(b && b.amount),
+      }))
+      .filter((r) => r.date)
+  } catch {
+    return []
+  }
+}
+
 async function opMinute(sdk, job) {
   const { symbols = [], period = 5, start, end, concurrency = 6 } = job
   const out = {}
@@ -189,7 +226,16 @@ async function opMinute(sdk, job) {
     const opts = { period: String(period) }
     if (start) opts.startDate = start
     if (end) opts.endDate = end
-    const bars = await fetchWithRetry(() => sdk.kline.cnMinute(sym, opts))
+    let bars
+    try {
+      bars = await fetchWithRetry(() => sdk.kline.cnMinute(sym, opts))
+    } catch {
+      bars = []
+    }
+    if (!Array.isArray(bars) || bars.length === 0) {
+      // 东财/腾讯源被阻断(部分网络)或返回空 → 新浪分钟回退
+      bars = await fetchSinaMinute(sym, period)
+    }
     out[sym] = Array.isArray(bars) ? bars : []
     return out[sym]
   })

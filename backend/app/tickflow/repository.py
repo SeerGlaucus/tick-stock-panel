@@ -525,7 +525,10 @@ class KlineRepository:
 
             step = time.perf_counter()
             logger.info("enriched refresh step start: latest date")
-            latest = self._latest_enriched_date_duckdb()
+            # 目录列举而非 DuckDB 视图查询: 视图 (read_parquet + union_by_name)
+            # 在 Windows 上会保留 glob 首个 parquet 的句柄, 导致后续全量重建
+            # os.replace 落盘时 WinError 5 失败 (见 enrich 重建故障排查记录)。
+            latest = self.latest_enriched_date("stock")
             logger.info("enriched refresh step done: latest date=%s (%.2fs)", latest, time.perf_counter() - step)
             if not latest:
                 # 磁盘已无数据: 必须清空内存缓存, 否则旧数据会残留
@@ -931,18 +934,27 @@ class KlineRepository:
         logger.info("live agg build done: rows=%d (%.2fs)", len(self._live_agg_cache), time.perf_counter() - started)
 
     def _live_agg_baseline_date(self, latest: date) -> date:
-        """盘中递推基准日期。当天实时分区存在时使用上一可用交易日。"""
+        """盘中递推基准日期。当天实时分区存在时使用上一可用交易日。
+
+        目录列举而非 DuckDB 视图查询: 视图 (read_parquet + union_by_name) 在
+        Windows 上会保留 glob 首个 parquet 的句柄 (见 _refresh_enriched 注释)。
+        """
         if latest != cn_today():
             return latest
         try:
-            row = self.execute_one(
-                "SELECT max(date) FROM kline_enriched WHERE date < ?",
-                [latest],
-            )
-            if row and row[0]:
-                d = row[0]
-                return d if isinstance(d, date) else date.fromisoformat(str(d))
-        except Exception:  # noqa: BLE001
+            previous: date | None = None
+            root = self.store.data_dir / "kline_daily_enriched"
+            if root.exists():
+                for partition in root.glob("date=*"):
+                    try:
+                        value = date.fromisoformat(partition.name.removeprefix("date="))
+                    except ValueError:
+                        continue
+                    if value < latest and (previous is None or value > previous):
+                        previous = value
+            if previous is not None:
+                return previous
+        except Exception:
             pass
         return latest
 
@@ -1251,7 +1263,7 @@ class KlineRepository:
                 # today 翻天了 (次日开盘首次轮询): 校验基准日是否需要前移重建。
                 # 同一天内多次调用直接跳过, 避免每轮都扫 parquet。
                 self._live_agg_check_date = today
-                disk_latest = self._latest_enriched_date_duckdb()
+                disk_latest = self.latest_enriched_date("stock")
                 if disk_latest is not None:
                     expected = self._live_agg_baseline_date(disk_latest)
                     if self._live_agg_cache_date != expected:
@@ -1921,19 +1933,6 @@ class KlineRepository:
             return [r[0] for r in rows if r and r[0]]
         except Exception:
             return []
-
-    def _latest_enriched_date_duckdb(self) -> date | None:
-        try:
-            with self._lock:
-                res = self.db.execute(
-                    "SELECT max(date) FROM kline_enriched",
-                ).fetchone()
-            if res and res[0]:
-                d = res[0]
-                return d if isinstance(d, date) else date.fromisoformat(str(d))
-        except Exception:  # noqa: BLE001
-            return None
-        return None
 
     # ================================================================
     # 写入 (Pipeline / Sync)

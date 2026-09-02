@@ -79,7 +79,8 @@ export function Financials() {
                 关于数据源
               </div>
               <p className="mt-1.5 text-[11px] leading-relaxed text-secondary">
-                当前财务数据源需付费,后续会接入免费数据源。如你常用某个免费财务数据源,欢迎在 Issues 中多多推荐哈 ~
+                当前未启用提供财务数据的数据源。可在「设置 → 数据源」中切换到支持财务数据的源
+                (如扶摇/同花顺官方 API)。如你常用其他免费财务数据源,欢迎在 Issues 中推荐。
               </p>
               <a
                 href="https://github.com/shy3130/tickflow-stock-panel/issues"
