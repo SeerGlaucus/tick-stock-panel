@@ -346,6 +346,8 @@ export interface ScreenerStrategy {
   source?: string
   /** 支持的周期, 如 ['1d'] / ['1m'] (分钟策略) */
   timeframes?: string[]
+  /** 策略执行后端; 'event' 为事件驱动策略 (仅回测) */
+  execution_backend?: string
 }
 
 export interface StrategyLoadError {
@@ -717,7 +719,7 @@ export interface StrategyDetail {
   description: string
   tags: string[]
   source: 'builtin' | 'custom' | 'ai' | 'composite'
-  execution_backend: 'polars_expr' | 'matrix_native' | 'python_history_legacy' | 'composite' | 'minute_filter'
+  execution_backend: 'polars_expr' | 'matrix_native' | 'python_history_legacy' | 'composite' | 'minute_filter' | 'event'
   asset_types: string[]
   timeframes: string[]
   version: string

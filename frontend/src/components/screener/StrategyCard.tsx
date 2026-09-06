@@ -94,22 +94,53 @@ interface StrategyCardProps {
   onToggleMonitor?: () => void
   /** 周期徽章 (如 '分钟'); 日线策略不传 */
   timeframeBadge?: string
+  /** 事件驱动策略: 无运行/命中/监控交互, 仅展示 + 设置 */
+  eventMode?: boolean
 }
 
 export function StrategyCard({
   name, description, source, active, count, expiredCount,
   loading, cardSize,
   onRun, disabled, onSettings, monitored, onToggleMonitor, timeframeBadge,
+  eventMode = false,
 }: StrategyCardProps) {
   const cs = CARD_STYLES[cardSize]
+  const srcLabel = cardSize === 'mini' ? (SRC_MAP[source ?? ''] ?? '内') : (SRC_MAP[source ?? ''] ?? '内置')
+  const badgeCls = BADGE_CLS_MAP[source ?? 'builtin'] ?? BADGE_CLS_MAP.builtin
+
+  // 事件驱动卡片: 仅展示 + 设置, 无运行/命中数/监控 (事件策略只可回测)。
+  if (eventMode) {
+    return (
+      <motion.div
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ duration: 0.12, ease: [0.16, 1, 0.3, 1] }}
+        className={`${cs.card} border transition-all duration-150 text-left border-border bg-surface`}
+      >
+        <div className="flex flex-col items-start min-w-0">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className={`text-[9px] px-1 py-px rounded border font-medium leading-tight shrink-0 ${badgeCls}`}>{srcLabel}</span>
+            <span className="text-[9px] px-1 py-px rounded border font-medium leading-tight shrink-0 border-violet-500/30 bg-violet-500/10 text-violet-400">事件</span>
+            <span className="text-xs font-medium truncate text-foreground">{name}</span>
+          </div>
+          {description && (
+            <span className="text-[10px] text-muted leading-tight mt-0.5 line-clamp-1 max-w-[160px]">{description}</span>
+          )}
+        </div>
+        <button onClick={(e) => { e.stopPropagation(); onSettings() }}
+          className="absolute top-1.5 right-1.5 p-0.5 rounded hover:bg-elevated transition-colors cursor-pointer" title="策略设置">
+          <Settings2 className="h-3 w-3 text-muted hover:text-accent transition-colors" />
+        </button>
+      </motion.div>
+    )
+  }
+
   const activeCls = active
     ? 'border-accent/50 bg-accent/10 shadow-[0_0_10px_rgba(59,130,246,0.1)]'
     : 'border-border bg-surface hover:border-accent/40 hover:bg-accent/[0.03]'
   const countCls = count === 0
     ? 'text-muted'
     : 'bg-gradient-to-r from-amber-400 to-orange-500 bg-clip-text text-transparent'
-  const srcLabel = cardSize === 'mini' ? (SRC_MAP[source ?? ''] ?? '内') : (SRC_MAP[source ?? ''] ?? '内置')
-  const badgeCls = BADGE_CLS_MAP[source ?? 'builtin'] ?? BADGE_CLS_MAP.builtin
 
   // 失效数 > 0 时显示
   const hasExpired = expiredCount != null && expiredCount > 0
