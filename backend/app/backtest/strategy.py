@@ -20,6 +20,7 @@ import numpy as np
 import polars as pl
 
 from app.backtest.engine import BacktestEngine, MatcherConfig, SimResult, SimulationOptions
+from app.backtest.event_engine import EventBacktestEngine
 from app.backtest.fundamentals import FUNDAMENTAL_FACTOR_NAMES
 from app.backtest.matrix import (
     MarketDataMatrix,
@@ -142,6 +143,13 @@ class StrategyDependencyResolver:
         basic_filter = _basic_filter_for_asset(basic_filter, asset_type)
         if strategy.execution_backend == "matrix_native":
             return self._resolve_matrix_native(
+                strategy,
+                params=params,
+                basic_filter=basic_filter,
+                overrides=overrides,
+            )
+        if strategy.execution_backend == "event":
+            return self._resolve_event(
                 strategy,
                 params=params,
                 basic_filter=basic_filter,
@@ -284,6 +292,69 @@ class StrategyDependencyResolver:
             warmup_bars=warmup_bars,
             full_feature_fallback=False,
             execution_backend="matrix_native",
+            fundamental_columns=frozenset(
+                required_features & FUNDAMENTAL_FACTOR_NAMES
+            ),
+        )
+
+    @staticmethod
+    def _resolve_event(
+        strategy: StrategyDef,
+        *,
+        params: dict,
+        basic_filter: dict,
+        overrides: dict,
+    ) -> ResolvedFeaturePlan:
+        """事件策略特征计划: 面板路径, 加载声明特征 + 执行列 + 涨跌停信号。
+
+        REQUIRED_FEATURES 已在加载期强制非空; 未声明列不会进入面板
+        (fail-closed 由加载链路保证)。warmup = max(history_bars, 指标/评分预热)。
+        """
+        required_features = set(strategy.required_features)
+        scoring = effective_scoring(strategy.meta.get("scoring"), overrides)
+        required_features.update(scoring_dependencies(scoring))
+        order_by = strategy.meta.get("order_by")
+        if order_by and order_by != "score":
+            required_features.add(str(order_by))
+        required_features.update(_basic_filter_dependencies(basic_filter))
+
+        required_signals = {"signal_limit_up", "signal_limit_down"}
+        embedded = {
+            feature
+            for feature in required_features
+            if feature.startswith(("signal_", "csg_"))
+        }
+        required_signals.update(embedded)
+        required_features.difference_update(embedded)
+
+        signal_dependencies = get_signal_dependencies()
+        unknown_signals = required_signals - set(signal_dependencies) - set(LIMIT_SIGNAL_OUTPUTS)
+        if unknown_signals:
+            raise ValueError(f"策略引用了不存在的信号: {sorted(unknown_signals)}")
+        for signal in required_signals:
+            required_features.update(signal_dependencies.get(signal, ()))
+
+        indicator_columns = frozenset(required_features & set(INDICATOR_COLUMNS))
+        base_columns = _resolve_base_columns(required_features | set(_EXECUTION_COLUMNS))
+        # 涨跌停信号需要原始价列 (沿用 _LIMIT_BASE_COLUMNS 契约)。
+        base_columns = frozenset(set(base_columns) | set(_LIMIT_BASE_COLUMNS))
+        instrument_columns = frozenset(required_features & set(_INSTRUMENT_COLUMNS))
+        instrument_columns = frozenset(set(instrument_columns) | {"name"})
+        warmup_bars = max(
+            60,
+            int(strategy.event_history_bars or 60),
+            scoring_warmup_bars(scoring),
+        )
+        return ResolvedFeaturePlan(
+            base_columns=base_columns,
+            intermediate_columns=frozenset(),
+            indicator_columns=indicator_columns,
+            signal_columns=frozenset(required_signals),
+            matrix_columns=frozenset(),
+            instrument_columns=instrument_columns,
+            warmup_bars=warmup_bars,
+            full_feature_fallback=False,
+            execution_backend="event",
             fundamental_columns=frozenset(
                 required_features & FUNDAMENTAL_FACTOR_NAMES
             ),
@@ -1153,6 +1224,24 @@ class StrategyBacktestService:
                 t0=t0,
             )
 
+        if s.execution_backend == "event":
+            # 事件驱动回测 (日频): 面板路径加载 -> 事件时钟 -> 组合撮合。
+            return self._run_event_backtest(
+                config, s, params, overrides,
+                basic_filter=basic_filter,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                trailing_stop=trailing_stop,
+                trailing_take_profit_activate=trailing_take_profit_activate,
+                trailing_take_profit_drawdown=trailing_take_profit_drawdown,
+                max_hold_days=max_hold_days,
+                progress_cb=progress_cb,
+                cancel_event=cancel_event,
+                result_policy=result_policy,
+                run_id=run_id,
+                t0=t0,
+            )
+
         try:
             if s.execution_backend == "composite":
                 # composite 回测: 子策略必须全为 matrix_native(否则 fail-closed),
@@ -1747,6 +1836,231 @@ class StrategyBacktestService:
             strategy_info=strategy_info,
             factor_attribution=factor_attribution,
             elapsed_ms=round(elapsed, 1),
+        )
+
+    # ── 事件策略回测: 面板路径 + 事件时钟 + 组合撮合 ──
+
+    def _run_event_backtest(
+        self,
+        config: StrategyBacktestConfig,
+        s: StrategyDef,
+        params: dict,
+        overrides: dict,
+        *,
+        basic_filter: dict,
+        stop_loss,
+        take_profit,
+        trailing_stop,
+        trailing_take_profit_activate,
+        trailing_take_profit_drawdown,
+        max_hold_days,
+        progress_cb,
+        cancel_event,
+        result_policy: BacktestResultPolicy,
+        run_id: str,
+        t0: float,
+    ) -> StrategyBacktestResult:
+        def _err(msg: str) -> StrategyBacktestResult:
+            return StrategyBacktestResult(
+                run_id=run_id,
+                config=self._config_to_dict(config),
+                error=msg,
+                elapsed_ms=(time.perf_counter() - t0) * 1000,
+            )
+
+        if config.entry_fill not in ("close_t", "open_t+1") or config.exit_fill not in ("close_t", "open_t+1"):
+            return _err("事件回测 v1 仅支持 close_t / open_t+1 成交口径")
+        if config.minute_fill:
+            return _err("事件回测不支持分钟精确成交 (minute_fill)")
+        if config.regime_filter:
+            return _err("事件回测 v1 暂不支持市场环境过滤 (regime_filter)")
+
+        feature_plan = StrategyDependencyResolver().resolve(
+            s,
+            params=params,
+            basic_filter=basic_filter,
+            entry_signals=[],
+            exit_signals=[],
+            overrides=overrides,
+            asset_type=config.asset_type,
+        )
+        warmup_days = max(120, int(max(feature_plan.warmup_bars, 1) * 1.6))
+        load_start = config.start - timedelta(days=warmup_days)
+        full_horizon_days = max(int(max_hold_days or config.holding_days or 5), 1)
+        load_end = config.end
+        if config.mode == "full":
+            load_end = config.end + timedelta(days=(full_horizon_days + 5) * 2)
+
+        timing_ms: dict[str, float] = {}
+        t_load = time.perf_counter()
+        try:
+            panel = self.engine.load_panel_for_backtest(
+                config.symbols,
+                load_start,
+                load_end,
+                feature_plan,
+                asset_type=config.asset_type,
+            )
+        except (ValueError, OSError, pl.exceptions.PolarsError) as e:
+            return _err(f"回测特征准备失败: {e}")
+        timing_ms["load_panel"] = round((time.perf_counter() - t_load) * 1000, 1)
+        if panel.is_empty():
+            return _err("无数据, 请检查日期范围或先运行盘后管道")
+
+        # universe: basic_filter 逐日候选集 (买入门控, 非候选标的由组合层拒绝)。
+        universe_by_day: dict[str, set[str]] = {}
+        if basic_filter and basic_filter.get("enabled", True):
+            expr = StrategyEngine._basic_filter_expr(panel, basic_filter)
+            if expr is not None:
+                try:
+                    mask = (
+                        panel.select(expr.alias("_basic"))["_basic"]
+                        .fill_null(False)
+                        .cast(pl.Boolean)
+                    )
+                except Exception as e:
+                    logger.warning("basic_filter mask failed: %s", e)
+                    return _err(f"基础过滤计算失败: {e}")
+                date_col = panel.get_column("date")
+                for day in panel.get_column("date").unique().sort().to_list():
+                    day_str = str(day)[:10]
+                    symbols = (
+                        panel.filter(mask & (date_col == day))
+                        .get_column("symbol")
+                        .cast(pl.Utf8)
+                        .to_list()
+                    )
+                    universe_by_day[day_str] = set(symbols)
+
+        # 评分列物化: universe 面板带 score 列, 脚本自行参考 (v1 不做自动排序)。
+        if effective_scoring(s.meta.get("scoring"), overrides):
+            panel = self._apply_score(panel, s, overrides)
+
+        matcher_config = MatcherConfig(
+            matching=config.matching,
+            entry_fill=config.entry_fill,
+            exit_fill=config.exit_fill,
+            fees_pct=config.fees_pct,
+            commission_pct=config.commission_pct,
+            stamp_tax_pct=config.stamp_tax_pct,
+            slippage_bps=config.slippage_bps,
+            stop_loss_pct=stop_loss,
+            take_profit_pct=take_profit,
+            trailing_stop_pct=trailing_stop,
+            trailing_take_profit_activate_pct=trailing_take_profit_activate,
+            trailing_take_profit_drawdown_pct=trailing_take_profit_drawdown,
+            max_hold_days=max_hold_days,
+            max_positions=config.max_positions,
+            max_exposure_pct=config.max_exposure_pct,
+            initial_capital=config.initial_capital,
+        )
+
+        try:
+            event_result = EventBacktestEngine().run(
+                s,
+                panel,
+                params,
+                matcher_config,
+                start=config.start,
+                asset_type=config.asset_type,
+                entry_end=config.end if config.mode == "full" else None,
+                universe_by_day=universe_by_day or None,
+                progress_cb=progress_cb,
+                cancel_event=cancel_event,
+            )
+        except (ValueError, RuntimeError, pl.exceptions.PolarsError) as e:
+            return _err(str(e))
+        timing_ms["simulate"] = event_result.elapsed_ms
+        timing_ms["total"] = round((time.perf_counter() - t0) * 1000, 1)
+
+        if cancel_event is not None and cancel_event.is_set():
+            return StrategyBacktestResult(
+                run_id=run_id,
+                config=self._config_to_dict(config),
+                error="cancelled",
+                elapsed_ms=round((time.perf_counter() - t0) * 1000, 1),
+            )
+
+        equity_values = [float(p["value"]) for p in event_result.equity_curve]
+        exposure_values = [float(p["exposure"]) for p in event_result.equity_curve]
+        stats = self.engine._calc_portfolio_stats_from_values(
+            equity_values,
+            exposure_values,
+            event_result.trades,
+            config.initial_capital,
+            include_monte_carlo=result_policy.include_monte_carlo,
+        )
+        stats["execution_backend"] = s.execution_backend
+        stats["timing_ms"] = timing_ms
+        stats["panel_rows"] = int(panel.height)
+        stats["panel_columns"] = int(panel.width)
+        stats["feature_columns"] = int(panel.width)
+        stats["full_feature_fallback"] = feature_plan.full_feature_fallback
+        stats["orders_total"] = int(event_result.orders_total)
+        stats["orders_rejected_by_reason"] = dict(event_result.reject_counts)
+        stats["cancelled"] = bool(event_result.cancelled)
+        stats["selection"] = {"strategy_matches": int(event_result.orders_total)}
+
+        benchmark_curve = (
+            self._build_benchmark_curve(config.start, config.end)
+            if result_policy.include_benchmark
+            else []
+        )
+
+        strategy_info = {
+            "id": s.meta.get("id", config.strategy_id),
+            "name": s.meta.get("name", config.strategy_id),
+            "description": s.meta.get("description", ""),
+            "entry_signals": [],
+            "exit_signals": [],
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "trailing_stop": trailing_stop,
+            "trailing_take_profit_activate": trailing_take_profit_activate,
+            "trailing_take_profit_drawdown": trailing_take_profit_drawdown,
+            "max_hold_days": max_hold_days,
+            "full_horizon_days": full_horizon_days,
+            "source": s.source,
+            "execution_backend": s.execution_backend,
+        } if result_policy.include_strategy_info else {}
+
+        # 因子归因 (fail-open): 声明特征列按 (symbol, 成交日) 关联成交。
+        factor_attribution = None
+        factor_cols = sorted(set(s.required_features) & set(panel.columns))
+        if factor_cols and event_result.trades and result_policy.include_trades:
+            try:
+                factor_attribution = _factor_attribution_summary(
+                    panel.select(["symbol", "date", *factor_cols]),
+                    event_result.trades,
+                )
+            except Exception as exc:
+                logger.warning("event factor attribution failed: %s", exc)
+
+        selected_stats = result_policy.select_stats(stats)
+        return StrategyBacktestResult(
+            run_id=run_id,
+            config=self._config_to_dict(config),
+            stats=selected_stats,
+            equity_curve=(
+                event_result.equity_curve if result_policy.include_curves else []
+            ),
+            drawdown_curve=(
+                event_result.drawdown_curve if result_policy.include_curves else []
+            ),
+            benchmark_curve=benchmark_curve,
+            trades=(
+                [self._trade_to_dict(t) for t in event_result.trades]
+                if result_policy.include_trades
+                else []
+            ),
+            per_symbol_stats=(
+                self.engine._calc_per_symbol(event_result.trades)
+                if result_policy.include_per_symbol_stats
+                else []
+            ),
+            strategy_info=strategy_info,
+            factor_attribution=factor_attribution,
+            elapsed_ms=round((time.perf_counter() - t0) * 1000, 1),
         )
 
     # ── 分钟策略回测: 逐日回放入场 + 日K矩阵离场 ──

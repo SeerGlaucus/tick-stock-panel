@@ -16,6 +16,7 @@ def _strategy(
     *,
     before=None,
     after=None,
+    initialize=None,
     max_hold_days=None,
     stop_loss=None,
     history_bars: int = 60,
@@ -36,6 +37,7 @@ def _strategy(
         source="custom",
         execution_backend="event",
         handle_data_fn=handle_data,
+        initialize_fn=initialize,
         before_trading_start_fn=before,
         after_trading_end_fn=after,
         event_history_bars=history_bars,
@@ -374,6 +376,29 @@ def test_entry_end_tail_skips_script_but_fills_pending():
     assert result.state["calls"] == 2  # 尾部不再调用脚本
     assert result.trades[0].entry_date == days[2].isoformat()
     assert result.trades[0].exit_reason == "end"
+
+
+def test_initialize_runs_once_before_days():
+    days = _dates(3)
+    start = days[0]
+
+    def initialize(context):
+        context.state["init_days"] = []
+
+    def handle(context):
+        context.state["init_days"].append(context.current_date.isoformat())
+
+    def after(context):
+        context.state["init_days"].append(("after", context.current_date.isoformat()))
+
+    result = EventBacktestEngine().run(
+        _strategy(handle, after=after, initialize=initialize),
+        _panel(days, ["A"]), {}, _matcher(matching="close_t"),
+        start=start,
+    )
+    # initialize 先于首个交易日时相执行; 状态跨日共享。
+    assert result.state["init_days"][0] == "2024-01-01"
+    assert result.state["init_days"][-1] == ("after", "2024-01-03")
 
 
 def test_script_error_propagates_with_phase_name():

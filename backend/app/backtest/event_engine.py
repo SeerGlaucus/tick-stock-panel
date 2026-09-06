@@ -113,6 +113,11 @@ class EventBacktestEngine:
         )
         universe_map = universe_by_day or {}
 
+        # initialize: run 开始一次, 状态初始化 (先于任何交易日时相)。
+        if strategy.initialize_fn is not None:
+            context.phase = "before_trading_start"
+            self._invoke(strategy.initialize_fn, context, "initialize", strategy_id)
+
         last_bars: dict[str, DayBar] = {}
         last_equity = 0.0
         peak = float(matcher.initial_capital)
