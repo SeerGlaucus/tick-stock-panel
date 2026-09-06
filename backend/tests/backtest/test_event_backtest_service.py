@@ -294,3 +294,41 @@ def test_guards(tmp_path):
 
     result = service.run(_config(formal[0], formal[-1], exit_fill="signal_next_minute"))
     assert result.error
+
+
+def test_event_resolver_includes_fundamental_factor_columns():
+    """财务因子名声明进 REQUIRED_FEATURES 时, 特征计划标注 fundamental_columns,
+    由加载口按公告日门控附加 (不落 enriched 存储)。"""
+    from app.backtest.strategy import StrategyDependencyResolver
+    from app.strategy.engine import StrategyDef
+
+    strategy = StrategyDef(
+        meta={"id": "evt_fund", "scoring": {}},
+        basic_filter={"enabled": False},
+        entry_signals=[],
+        exit_signals=[],
+        stop_loss=None,
+        trailing_stop=None,
+        trailing_take_profit_activate=None,
+        trailing_take_profit_drawdown=None,
+        max_hold_days=None,
+        filter_fn=None,
+        filter_history_fn=None,
+        lookback_days=1,
+        source="custom",
+        execution_backend="event",
+        handle_data_fn=lambda context: None,
+        required_features=frozenset({"close", "roe_latest"}),
+        event_history_bars=60,
+    )
+    plan = StrategyDependencyResolver().resolve(
+        strategy,
+        params={},
+        basic_filter={"enabled": False},
+        entry_signals=[],
+        exit_signals=[],
+        overrides={},
+        asset_type="stock",
+    )
+    assert plan.execution_backend == "event"
+    assert plan.fundamental_columns == frozenset({"roe_latest"})

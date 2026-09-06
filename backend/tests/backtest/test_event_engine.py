@@ -7,7 +7,7 @@ import polars as pl
 import pytest
 
 from app.backtest.engine import MatcherConfig
-from app.backtest.event_engine import EventBacktestEngine
+from app.backtest.event_engine import EventBacktestEngine, EventRunResult
 from app.strategy.engine import StrategyDef
 
 
@@ -393,7 +393,9 @@ def test_initialize_runs_once_before_days():
 
     result = EventBacktestEngine().run(
         _strategy(handle, after=after, initialize=initialize),
-        _panel(days, ["A"]), {}, _matcher(matching="close_t"),
+        _panel(days, ["A"]),
+        {},
+        _matcher(matching="close_t"),
         start=start,
     )
     # initialize 先于首个交易日时相执行; 状态跨日共享。
@@ -511,3 +513,41 @@ def test_loader_integration_end_to_end(tmp_path):
 
     assert len(result.trades) == 1
     assert result.trades[0].exit_reason == "end"
+
+
+def test_engine_level_determinism():
+    """同输入两次运行逐字段一致: 事件顺序与状态演化可复现 (优化/步进前提)。"""
+    days = _dates(5)
+    start = days[0]
+    bars = _panel(days, ["A", "B"])
+
+    def handle(context):
+        context.state["n"] = context.state.get("n", 0) + 1
+        if context.current_date == start:
+            context.order_buy("A", 1000.0)
+        if context.current_date == days[2]:
+            context.order_sell("A", None)
+            context.order_buy("B", 2400.0)
+
+    def scenario() -> EventRunResult:
+        return EventBacktestEngine().run(
+            _strategy(handle),
+            bars,
+            {},
+            _matcher(matching="close_t"),
+            start=start,
+        )
+
+    first, second = scenario(), scenario()
+    assert [
+        (t.symbol, t.entry_date, t.exit_date, t.exit_price, t.exit_reason, t.shares)
+        for t in first.trades
+    ] == [
+        (t.symbol, t.entry_date, t.exit_date, t.exit_price, t.exit_reason, t.shares)
+        for t in second.trades
+    ]
+    assert first.equity_curve == second.equity_curve
+    assert first.drawdown_curve == second.drawdown_curve
+    assert first.reject_counts == second.reject_counts
+    assert first.state == second.state
+    assert first.orders_total == second.orders_total
