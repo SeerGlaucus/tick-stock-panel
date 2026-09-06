@@ -25,6 +25,7 @@ from app.backtest.matrix import (
     build_market_matrix,
     load_market_data_matrix_from_parquet,
 )
+from app.backtest.order_router import can_buy, can_sell, is_suspended_bar
 from app.config import settings
 from app.enriched_generation import EnrichedGenerationUnavailableError
 from app.parquet import scan_enriched_parquet
@@ -900,37 +901,29 @@ class BacktestEngine:
                 reference if _valid_price(reference) else None,
             )
 
-        def _one_price_limit(time_id: int, asset_id: int, direction: str) -> bool:
-            if not matrix.tradable[time_id, asset_id]:
-                return False
-            prices = [
-                float(matrix.open[time_id, asset_id]), float(matrix.high[time_id, asset_id]),
-                float(matrix.low[time_id, asset_id]), float(matrix.close[time_id, asset_id]),
-            ]
-            if not all(_valid_price(value) for value in prices):
-                return False
-            same = max(prices) - min(prices) <= max(abs(prices[3]) * 1e-4, 0.01)
-            flags = matrix.limit_up_locked if direction == "up" else matrix.limit_down_locked
-            return bool(flags[time_id, asset_id]) and same
-
         def _can_buy(time_id: int, asset_id: int) -> tuple[bool, str]:
-            if not matrix.tradable[time_id, asset_id]:
-                return False, "buy_suspended"
-            if not _valid_price(entry_prices[time_id, asset_id]):
-                return False, "buy_invalid_price"
-            if _one_price_limit(time_id, asset_id, "up"):
-                return False, "buy_limit_up"
-            return True, ""
+            return can_buy(
+                suspended=not bool(matrix.tradable[time_id, asset_id]),
+                fill_price=entry_prices[time_id, asset_id],
+                open_=matrix.open[time_id, asset_id],
+                high=matrix.high[time_id, asset_id],
+                low=matrix.low[time_id, asset_id],
+                close=matrix.close[time_id, asset_id],
+                limit_up=bool(matrix.limit_up_locked[time_id, asset_id]),
+                limit_down=bool(matrix.limit_down_locked[time_id, asset_id]),
+            )
 
         def _can_sell(time_id: int, asset_id: int, override: float | None) -> tuple[bool, str]:
-            if not matrix.tradable[time_id, asset_id]:
-                return False, "sell_suspended"
-            price = override if override is not None else exit_prices[time_id, asset_id]
-            if not _valid_price(price):
-                return False, "sell_invalid_price"
-            if _one_price_limit(time_id, asset_id, "down"):
-                return False, "sell_limit_down"
-            return True, ""
+            return can_sell(
+                suspended=not bool(matrix.tradable[time_id, asset_id]),
+                fill_price=override if override is not None else exit_prices[time_id, asset_id],
+                open_=matrix.open[time_id, asset_id],
+                high=matrix.high[time_id, asset_id],
+                low=matrix.low[time_id, asset_id],
+                close=matrix.close[time_id, asset_id],
+                limit_up=bool(matrix.limit_up_locked[time_id, asset_id]),
+                limit_down=bool(matrix.limit_down_locked[time_id, asset_id]),
+            )
 
         def _risk_exit(pos: dict, time_id: int, asset_id: int) -> tuple[str | None, float | None]:
             if pos.get("pending_exit_reason") or pos["entry_time"] == time_id:
@@ -1304,51 +1297,38 @@ class BacktestEngine:
             return v > 0 and np.isfinite(v)
 
         def _is_suspended(idx: int) -> bool:
-            o = float(open_prices[idx])
-            h = float(high_prices[idx])
-            l = float(low_prices[idx])
-            c = float(close_prices[idx])
-            valid_bar = any(_valid_price(x) for x in (o, h, l, c))
-            if not valid_bar:
-                return True
-            if has_volume and float(volumes[idx] or 0) <= 0:
-                same_price = max(o, h, l, c) - min(o, h, l, c) <= max(abs(c) * 1e-4, 0.01)
-                if same_price:
-                    return True
-            return False
-
-        def _is_one_price_limit(idx: int, direction: str) -> bool:
-            if _is_suspended(idx):
-                return False
-            o = float(open_prices[idx])
-            h = float(high_prices[idx])
-            l = float(low_prices[idx])
-            c = float(close_prices[idx])
-            if not all(_valid_price(x) for x in (o, h, l, c)):
-                return False
-            same_price = max(o, h, l, c) - min(o, h, l, c) <= max(abs(c) * 1e-4, 0.01)
-            if direction == "up":
-                return bool(limit_up_flags[idx]) and same_price
-            return bool(limit_down_flags[idx]) and same_price
+            return is_suspended_bar(
+                open_prices[idx],
+                high_prices[idx],
+                low_prices[idx],
+                close_prices[idx],
+                volume=volumes[idx],
+                has_volume=has_volume,
+            )
 
         def _can_buy(idx: int) -> tuple[bool, str]:
-            if _is_suspended(idx):
-                return False, "buy_suspended"
-            if not _valid_price(entry_prices[idx]):
-                return False, "buy_invalid_price"
-            if _is_one_price_limit(idx, "up"):
-                return False, "buy_limit_up"
-            return True, ""
+            return can_buy(
+                suspended=_is_suspended(idx),
+                fill_price=entry_prices[idx],
+                open_=open_prices[idx],
+                high=high_prices[idx],
+                low=low_prices[idx],
+                close=close_prices[idx],
+                limit_up=bool(limit_up_flags[idx]),
+                limit_down=bool(limit_down_flags[idx]),
+            )
 
         def _can_sell(idx: int, exit_price_override: float | None = None) -> tuple[bool, str]:
-            if _is_suspended(idx):
-                return False, "sell_suspended"
-            exit_price = exit_price_override if exit_price_override is not None else exit_prices[idx]
-            if not _valid_price(exit_price):
-                return False, "sell_invalid_price"
-            if _is_one_price_limit(idx, "down"):
-                return False, "sell_limit_down"
-            return True, ""
+            return can_sell(
+                suspended=_is_suspended(idx),
+                fill_price=exit_price_override if exit_price_override is not None else exit_prices[idx],
+                open_=open_prices[idx],
+                high=high_prices[idx],
+                low=low_prices[idx],
+                close=close_prices[idx],
+                limit_up=bool(limit_up_flags[idx]),
+                limit_down=bool(limit_down_flags[idx]),
+            )
 
         def _risk_exit(pos: dict, idx: int) -> tuple[str | None, float | None]:
             if pos.get("pending_exit_reason") or pos.get("entry_idx") == idx:
@@ -1825,39 +1805,29 @@ class BacktestEngine:
                 reference if _valid_price(reference) else None,
             )
 
-        def _one_price_limit(time_id: int, asset_id: int, direction: str) -> bool:
-            if not matrix.tradable[time_id, asset_id]:
-                return False
-            prices = (
-                float(matrix.open[time_id, asset_id]),
-                float(matrix.high[time_id, asset_id]),
-                float(matrix.low[time_id, asset_id]),
-                float(matrix.close[time_id, asset_id]),
-            )
-            if not all(_valid_price(value) for value in prices):
-                return False
-            same_price = max(prices) - min(prices) <= max(abs(prices[3]) * 1e-4, 0.01)
-            flag = matrix.limit_up_locked if direction == "up" else matrix.limit_down_locked
-            return bool(flag[time_id, asset_id]) and same_price
-
         def _can_buy(time_id: int, asset_id: int) -> tuple[bool, str]:
-            if not matrix.tradable[time_id, asset_id]:
-                return False, "buy_suspended"
-            if not _valid_price(entry_prices[time_id, asset_id]):
-                return False, "buy_invalid_price"
-            if _one_price_limit(time_id, asset_id, "up"):
-                return False, "buy_limit_up"
-            return True, ""
+            return can_buy(
+                suspended=not bool(matrix.tradable[time_id, asset_id]),
+                fill_price=entry_prices[time_id, asset_id],
+                open_=matrix.open[time_id, asset_id],
+                high=matrix.high[time_id, asset_id],
+                low=matrix.low[time_id, asset_id],
+                close=matrix.close[time_id, asset_id],
+                limit_up=bool(matrix.limit_up_locked[time_id, asset_id]),
+                limit_down=bool(matrix.limit_down_locked[time_id, asset_id]),
+            )
 
         def _can_sell(time_id: int, asset_id: int, override: float | None = None) -> tuple[bool, str]:
-            if not matrix.tradable[time_id, asset_id]:
-                return False, "sell_suspended"
-            price = override if override is not None else exit_prices[time_id, asset_id]
-            if not _valid_price(price):
-                return False, "sell_invalid_price"
-            if _one_price_limit(time_id, asset_id, "down"):
-                return False, "sell_limit_down"
-            return True, ""
+            return can_sell(
+                suspended=not bool(matrix.tradable[time_id, asset_id]),
+                fill_price=override if override is not None else exit_prices[time_id, asset_id],
+                open_=matrix.open[time_id, asset_id],
+                high=matrix.high[time_id, asset_id],
+                low=matrix.low[time_id, asset_id],
+                close=matrix.close[time_id, asset_id],
+                limit_up=bool(matrix.limit_up_locked[time_id, asset_id]),
+                limit_down=bool(matrix.limit_down_locked[time_id, asset_id]),
+            )
 
         def _mark_pending(
             asset_id: int,
@@ -2368,51 +2338,38 @@ class BacktestEngine:
             return value
 
         def _is_suspended(idx: int) -> bool:
-            o = float(open_prices[idx])
-            h = float(high_prices[idx])
-            l = float(low_prices[idx])
-            c = float(close_prices[idx])
-            valid_bar = any(_valid_price(x) for x in (o, h, l, c))
-            if not valid_bar:
-                return True
-            if has_volume and float(volumes[idx] or 0) <= 0:
-                same_price = max(o, h, l, c) - min(o, h, l, c) <= max(abs(c) * 1e-4, 0.01)
-                if same_price:
-                    return True
-            return False
-
-        def _is_one_price_limit(idx: int, direction: str) -> bool:
-            if _is_suspended(idx):
-                return False
-            o = float(open_prices[idx])
-            h = float(high_prices[idx])
-            l = float(low_prices[idx])
-            c = float(close_prices[idx])
-            if not all(_valid_price(x) for x in (o, h, l, c)):
-                return False
-            same_price = max(o, h, l, c) - min(o, h, l, c) <= max(abs(c) * 1e-4, 0.01)
-            if direction == "up":
-                return bool(limit_up_flags[idx]) and same_price
-            return bool(limit_down_flags[idx]) and same_price
+            return is_suspended_bar(
+                open_prices[idx],
+                high_prices[idx],
+                low_prices[idx],
+                close_prices[idx],
+                volume=volumes[idx],
+                has_volume=has_volume,
+            )
 
         def _can_buy(idx: int) -> tuple[bool, str]:
-            if _is_suspended(idx):
-                return False, "buy_suspended"
-            if not _valid_price(entry_prices[idx]):
-                return False, "buy_invalid_price"
-            if _is_one_price_limit(idx, "up"):
-                return False, "buy_limit_up"
-            return True, ""
+            return can_buy(
+                suspended=_is_suspended(idx),
+                fill_price=entry_prices[idx],
+                open_=open_prices[idx],
+                high=high_prices[idx],
+                low=low_prices[idx],
+                close=close_prices[idx],
+                limit_up=bool(limit_up_flags[idx]),
+                limit_down=bool(limit_down_flags[idx]),
+            )
 
         def _can_sell(idx: int, exit_price_override: float | None = None) -> tuple[bool, str]:
-            if _is_suspended(idx):
-                return False, "sell_suspended"
-            exit_price = exit_price_override if exit_price_override is not None else exit_prices[idx]
-            if not _valid_price(exit_price):
-                return False, "sell_invalid_price"
-            if _is_one_price_limit(idx, "down"):
-                return False, "sell_limit_down"
-            return True, ""
+            return can_sell(
+                suspended=_is_suspended(idx),
+                fill_price=exit_price_override if exit_price_override is not None else exit_prices[idx],
+                open_=open_prices[idx],
+                high=high_prices[idx],
+                low=low_prices[idx],
+                close=close_prices[idx],
+                limit_up=bool(limit_up_flags[idx]),
+                limit_down=bool(limit_down_flags[idx]),
+            )
 
         def _mark_pending(sym: str, reason: str, signal_date: str) -> None:
             pos = positions[sym]
