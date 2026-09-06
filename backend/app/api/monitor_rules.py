@@ -288,6 +288,8 @@ def save_rule(req: RuleModel, request: Request):
                     as_of=date.today(),
                 ),
             )
+            if strategy.execution_backend == "event":
+                raise ValueError("事件驱动策略仅支持回测验证, 不支持实时监控")
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
     # 编辑现有规则时, 保留原 created_at (避免按时间排序时位置跳动)

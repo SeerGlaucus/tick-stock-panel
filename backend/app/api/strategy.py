@@ -1001,6 +1001,10 @@ def _save_composite_strategy(req: StrategyCompositeSaveRequest, request: Request
             raise ValueError(f"子策略 {c['strategy_id']!r} 不存在") from exc
         if child_def.execution_backend == "composite":
             raise ValueError(f"子策略 {c['strategy_id']!r} 也是叠加策略; 首版禁止嵌套叠加")
+        if child_def.execution_backend == "event":
+            raise ValueError(
+                f"子策略 {c['strategy_id']!r} 是事件驱动策略; 叠加策略仅支持信号型子策略"
+            )
 
     code = _render_composite_code(
         sid, req.name, req.description, children, req.merge_mode, req.min_confirm
