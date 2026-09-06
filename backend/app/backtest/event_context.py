@@ -84,7 +84,8 @@ class EventContext:
     # ── 下单 API (成交异步, 结果见 orders_today) ─────────────────
 
     def order_buy(self, symbol: str, amount: float) -> None:
-        """按金额买入; 引擎向下取整手 (100 股), 零头回现金。"""
+        """按金额买入; 引擎向下取整手 (100 股), 零头回现金。仅 handle_data 时相可下单。"""
+        self._require_order_phase()
         if not isinstance(symbol, str) or not symbol:
             raise ValueError(f"order_buy 的 symbol 必须是非空字符串: {symbol!r}")
         if isinstance(amount, bool) or not isinstance(amount, (int, float)):
@@ -95,7 +96,8 @@ class EventContext:
         self.portfolio.submit_buy(symbol, value)
 
     def order_sell(self, symbol: str, shares: float | None = None) -> None:
-        """卖出; shares=None 表示清仓。"""
+        """卖出; shares=None 表示清仓。仅 handle_data 时相可下单。"""
+        self._require_order_phase()
         if not isinstance(symbol, str) or not symbol:
             raise ValueError(f"order_sell 的 symbol 必须是非空字符串: {symbol!r}")
         if shares is not None:
@@ -106,6 +108,12 @@ class EventContext:
                 raise ValueError(f"order_sell 的 shares 必须是有限正数: {shares!r}")
             shares = value
         self.portfolio.submit_sell(symbol, shares)
+
+    def _require_order_phase(self) -> None:
+        if self.phase != "handle_data":
+            raise ValueError(
+                f"事件策略仅在 handle_data 时相可以下单, 当前时相: {self.phase}"
+            )
 
     # ── 组合状态 (只读视图) ─────────────────────────────────────
 

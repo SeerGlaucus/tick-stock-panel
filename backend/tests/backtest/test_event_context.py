@@ -160,6 +160,17 @@ def test_portfolio_views_delegate():
     assert context.orders_today == [{"symbol": "A", "status": "filled"}]
 
 
+def test_orders_rejected_outside_handle_data_phase():
+    portfolio = FakePortfolio()
+    for phase in ("before_trading_start", "after_trading_end"):
+        context = _context(_panel(["A"]), phase=phase, portfolio=portfolio)
+        with pytest.raises(ValueError, match="handle_data"):
+            context.order_buy("600000.SH", 1000)
+        with pytest.raises(ValueError, match="handle_data"):
+            context.order_sell("600000.SH")
+    assert portfolio.submitted == []
+
+
 def test_state_is_shared_mutable_dict():
     context = _context(_panel(["A"]))
     assert context.state == {}
