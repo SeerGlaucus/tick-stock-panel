@@ -86,3 +86,28 @@
 ## 新增内置策略(贡献者)
 
 如果你想为项目贡献一个内置策略:在 `backend/app/strategy/builtin/` 参照现有文件实现 `StrategyDef`,引擎会自动发现并加载。欢迎提交 PR。
+
+---
+
+## 事件驱动策略（仅回测）
+
+事件驱动策略（`EXECUTION_BACKEND = "event"`）按交易日推进, 在 `handle_data` 中持有
+跨日状态并主动下单, 表达择时/轮动/动态仓位等时序逻辑。与信号策略的本质区别:
+
+| | 信号策略 | 事件策略 |
+| --- | --- | --- |
+| 本质 | 无状态横截面筛选器 | 有状态全时序交易脚本 |
+| 能力 | 选股/信号历史/监控/叠加子策略/回测 | **仅回测** |
+| 出入场 | 配置（ENTRY/EXIT_SIGNALS） | 代码（handle_data 内 order_buy/order_sell） |
+| 风控 | 配置 + 引擎自动评估 | **同样配置 + 引擎自动评估（脚本不写风控）** |
+
+要点：
+
+- 文件结构 = META（同信号策略, 新增可选 `history_bars`）+ `REQUIRED_FEATURES`（必填）+
+  `initialize/handle_data/before_trading_start/after_trading_end` 函数;
+  不得定义 filter/filter_history/MATRIX_STRATEGY/ENTRY_SIGNALS/EXIT_SIGNALS。
+- 配置化延续: 参数（params/override）、股票池（basic_filter）、风控（止损/止盈/持有天数）、
+  评分（scoring → universe 的 score 列）全部照旧配置化。
+- 页面入口: 策略页顶部「事件驱动」视图（卡片仅展示 + 设置）; 回测页选择该策略运行。
+- 完整契约见 [`docs/event-backtest-design.md`](event-backtest-design.md) 与
+  [`backend/app/strategy/prompts/strategy-event-guide.md`](../backend/app/strategy/prompts/strategy-event-guide.md)。

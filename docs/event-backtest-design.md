@@ -1,7 +1,7 @@
 # 事件驱动回测（日频）设计方案
 
-> **状态：设计草案，尚未实现。** 文中标注"新增/改造"的模块、接口与字段均为规划内容，
-> 不得视为仓库中已存在的 API。实现前应重新核对本文引用的现有模块调用链与测试。
+> **状态：Phase 0–1（T0.1–T1.9）已实现并合入，Phase 2（T2.1–T2.4）已实现。**
+> 文中 API 与行为以当前实现为准；实现与本文的偏差记录在 §9 各阶段备注中。
 
 ## 1. 背景与目标
 
@@ -291,9 +291,9 @@ context.order_sell(symbol, shares=None)  # shares=None 表示清仓
 
 | 阶段 | 内容 | 完成标准 |
 | --- | --- | --- |
-| Phase 0 | 共享订单路由重构（D1/D2） | 矩阵撮合行为不变，既有回测测试全绿 |
-| Phase 1 | 日频事件引擎（D3/D4/D5/D6/D7/D8/D11）+ 前端两态视图（D9） | §10 验证矩阵通过；标准结果契约端到端可用 |
-| Phase 2 | 运维增强：event 优化限制、AI 模板（D10）、文档（strategy.md/strategy-guide.md） | 优化/步进可用；AI 可生成事件策略 |
+| Phase 0 | 共享订单路由重构（D1/D2） | ✅ 已实现（`backtest/order_router.py`） |
+| Phase 1 | 日频事件引擎（D3/D4/D5/D6/D7/D8/D11）+ 前端两态视图（D9） | ✅ 已实现（T1.1–T1.9；`event_context/event_portfolio/event_engine` + 服务接入 + API 守卫 + 前端两态视图） |
+| Phase 2 | 运维增强：event 优化限制、AI 模板（D10）、文档（strategy.md/strategy-guide.md） | ✅ 已实现（T2.1–T2.3） |
 | 远期（单独立项） | 分钟级 `handle_bar` 与盘中调度；实盘桥接；`order_target_pct`；composite 事件子策略 | 各自立项后再评估 |
 
 ### 实盘桥接预留（本期不做）

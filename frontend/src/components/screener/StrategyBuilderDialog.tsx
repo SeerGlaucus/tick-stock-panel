@@ -281,11 +281,12 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
     } else if (d) {
       const restoredSource = d.source ?? (d.strategyId?.startsWith('custom_') ? 'custom' : 'ai')
       setStep(d.step ?? 1); setName(d.name ?? ''); setDescription(d.description ?? '')
-      setDirection(d.direction ?? 'long')
-      setExecutionBackend(
+      const restoredBackend: 'polars_expr' | 'matrix_native' | 'event' =
         (d as any).executionBackend
-        ?? (String(d.code ?? '').includes('matrix_native') ? 'matrix_native' : 'polars_expr'),
-      )
+        ?? (String(d.code ?? '').includes('EXECUTION_BACKEND = "event"') ? 'event'
+          : String(d.code ?? '').includes('matrix_native') ? 'matrix_native' : 'polars_expr')
+      setExecutionBackend(restoredBackend)
+      setDirection(restoredBackend === 'event' ? 'long' : (d.direction ?? 'long'))
       setRules(d.rules ?? ''); setCode(d.code ?? ''); setStrategyId(d.strategyId ?? '')
       setSource(restoredSource)
       setTab(mode === 'modify' || restoredSource === 'custom' ? 'custom' : 'ai')
@@ -332,6 +333,8 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
 
   const selectExecutionBackend = (backend: 'polars_expr' | 'matrix_native' | 'event') => {
     setExecutionBackend(backend)
+    // 事件驱动策略 v1 仅支持做多: 切换后端时同步锁方向
+    if (backend === 'event') setDirection('long')
     if (tab === 'custom' && (!code || code === CUSTOM_TEMPLATE || code === MATRIX_TEMPLATE || code === EVENT_TEMPLATE)) {
       setCode(templateFor(backend))
     }
@@ -540,9 +543,23 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
                 <div>
                   <span className="text-[10px] text-muted/50 uppercase tracking-wider mb-1.5 block">选股方向</span>
                   <div className="flex gap-1">
-                    {DIRECTIONS.map(d => (
-                      <button key={d.value} onClick={() => setDirection(d.value)} className={'px-2.5 py-1 rounded text-[11px] font-medium border transition-colors ' + (direction === d.value ? 'border-amber-400/40 bg-amber-400/10 text-amber-400' : 'border-border bg-base text-muted hover:border-amber-400/30')}>{d.label}</button>
-                    ))}
+                    {DIRECTIONS.map(d => {
+                      const lockedByEvent = executionBackend === 'event' && d.value !== 'long'
+                      return (
+                        <button
+                          key={d.value}
+                          disabled={lockedByEvent}
+                          title={lockedByEvent ? '事件驱动策略仅支持做多' : undefined}
+                          onClick={() => setDirection(d.value)}
+                          className={'px-2.5 py-1 rounded text-[11px] font-medium border transition-colors ' + (
+                            lockedByEvent
+                              ? 'border-border bg-base text-muted/40 cursor-not-allowed'
+                              : direction === d.value
+                                ? 'border-amber-400/40 bg-amber-400/10 text-amber-400'
+                                : 'border-border bg-base text-muted hover:border-amber-400/30'
+                          )}>{d.label}</button>
+                      )
+                    })}
                   </div>
                 </div>
                 <div>

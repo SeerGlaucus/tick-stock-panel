@@ -365,3 +365,56 @@ def filter_history(df: pl.DataFrame, params: dict) -> pl.DataFrame:
 ## 8. 完整示例
 
 见 [strategy-example.md](./strategy-example.md) — 从零创建强势反包策略的三步完整演示。
+
+## 9. 事件驱动策略（event 后端）
+
+`EXECUTION_BACKEND = "event"` 的策略按交易日推进，在 `handle_data` 中持有跨日状态并
+主动下单，用于表达择时/轮动/动态仓位等时序逻辑。**仅支持回测**，不产生横截面信号
+（不进选股/监控/叠加）。契约如下：
+
+```python
+import polars as pl
+
+META = {
+    "id": "custom_xxx",
+    "name": "策略名",
+    "description": "一句话描述",
+    "asset_types": ["stock"],
+    "timeframes": ["1d"],          # 必含 "1d"
+    "history_bars": 60,            # 可选(默认 60): context.history(n) 的 n 上限
+    "basic_filter": {...},         # 同信号策略: 每日候选股票池
+    "params": [...],               # 同信号策略: UI 参数编辑器 + context.params
+    "scoring": {...},              # 同信号策略: 权重总和 1.0, 引擎物化 score 列
+}
+EXECUTION_BACKEND = "event"
+REQUIRED_FEATURES = ["close", "ma20"]   # 必填: 脚本可读列(基础列之外)
+STOP_LOSS = -0.07                 # 风控走 META + 设置弹窗, 引擎自动执行
+MAX_HOLD_DAYS = 20
+
+
+def initialize(context):
+    pass        # 可选: run 开始一次, 初始化 context.state
+
+def handle_data(context):
+    pass        # 必填: T 收盘后, 唯一可下单时相
+
+def before_trading_start(context):  # 可选: T 开盘前, 只读
+    pass
+
+def after_trading_end(context):     # 可选: T 撮合完成后, 只读
+    pass
+```
+
+关键 API：`context.params` / `current_date` / `state` / `universe`(当日候选面板,
+含 REQUIRED_FEATURES 与 score) / `history(n)` / `positions` / `cash` /
+`order_buy(symbol, amount)` / `order_sell(symbol, shares=None)`。
+
+三条铁律：
+
+1. **不写风控**：止损/止盈/移动止损/持有天数只通过 META 与设置弹窗配置，引擎自动评估。
+2. **不硬编码股票池**：候选集由 basic_filter 每日计算，非候选标的买入会被拒绝。
+3. **只读声明列**：只能读 REQUIRED_FEATURES 声明的列，未声明列不在面板内。
+
+不得定义 `filter` / `filter_history` / `MATRIX_STRATEGY` / `ENTRY_SIGNALS` / `EXIT_SIGNALS`。
+完整契约见 `backend/app/strategy/prompts/strategy-event-guide.md` 与
+`docs/event-backtest-design.md`。

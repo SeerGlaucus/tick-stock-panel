@@ -536,7 +536,7 @@ class BuildRequest(BaseModel):
     direction: str = "long"
     rules: str = ""
     strategy_id: str = ""
-    execution_backend: Literal["polars_expr", "matrix_native"] = "polars_expr"
+    execution_backend: Literal["polars_expr", "matrix_native", "event"] = "polars_expr"
     # step2 字段
     current_code: str = ""
     instruction: str = ""
@@ -862,6 +862,8 @@ async def ai_test(request: Request):
 
 
 def _build_prompt(req: BuildRequest) -> str:
+    if req.execution_backend == "event" and req.direction != "long":
+        raise ValueError("事件驱动策略仅支持做多 (direction=long)")
     if req.step == 1:
         return build_step1(
             req.name,

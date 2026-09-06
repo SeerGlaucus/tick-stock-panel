@@ -204,6 +204,10 @@ class PhaseRssSampler(Protocol):
 class StrategyOptimizer:
     """在单 worker 内遍历参数组合, 并按目标排序。"""
 
+    # 事件策略逐交易日循环, 单 trial 成本显著高于矩阵路径:
+    # 网格超过此规模时给出明确提示 (不阻断, 由用户决定是否缩小)。
+    EVENT_MAX_GRID_TRIALS = 500
+
     def __init__(self, service, strategy_engine) -> None:
         self.service = service
         self.strategy_engine = strategy_engine
@@ -231,6 +235,21 @@ class StrategyOptimizer:
         params_meta = s.meta.get("params", [])
         combos = expand_param_grid(params_meta, cfg.param_grid)
         n_total = len(combos)
+
+        if getattr(s, "execution_backend", "polars_expr") == "event":
+            # 蒙特卡洛重采样目标在事件策略上成本不可控: fail-closed 拒绝。
+            if str(cfg.objective).startswith("mc_"):
+                raise ValueError(
+                    f"事件驱动策略的优化目标 '{cfg.objective}' 依赖蒙特卡洛重采样, "
+                    "暂不支持; 请改用 sortino / sharpe / max_drawdown 等目标"
+                )
+            if n_total > self.EVENT_MAX_GRID_TRIALS:
+                logger.warning(
+                    "事件驱动策略参数网格 %d 组超过建议上限 %d, "
+                    "单组逐日循环成本高, 建议缩小网格范围",
+                    n_total,
+                    self.EVENT_MAX_GRID_TRIALS,
+                )
 
         results: list[dict] = []
         backtest_configs = [
