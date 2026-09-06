@@ -159,12 +159,11 @@ class WalkForwardService:
             return None
         strategy = self.strategy_engine.get(cfg.strategy_id)
         if strategy.execution_backend != "matrix_native":
-            # event 策略走通用路径: 每折独立优化 + OOS 回测 (限制见 StrategyOptimizer)。
-            if strategy.execution_backend in ("python_history_legacy", "polars_expr", "event"):
+            if strategy.execution_backend in ("python_history_legacy", "polars_expr"):
                 return None
             raise ValueError(
                 f"步进优化暂仅支持矩阵(matrix_native)/日线历史(python_history_legacy/"
-                f"polars_expr)/事件驱动(event)策略; {cfg.strategy_id} 是 {strategy.execution_backend}"
+                f"polars_expr)策略; {cfg.strategy_id} 是 {strategy.execution_backend}"
             )
 
         from app.backtest.optimizer import expand_param_grid

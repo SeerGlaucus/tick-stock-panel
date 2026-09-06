@@ -37,30 +37,6 @@ def build_step1(
     """
     id_line = f"\n策略ID（必须使用此ID）：{strategy_id}" if strategy_id else ""
 
-    if execution_backend == "event":
-        event_guide = _load_doc("strategy-event-guide.md")
-        return f"""请根据以下用户输入生成完整的事件驱动策略代码：
-
-策略名称：{name}{id_line}
-策略描述：{description}
-策略方向：做多（事件驱动策略 v1 仅支持做多, A 股无做空）
-执行后端：event
-策略规则：
-{rules}
-
-输出要求：
-1. 严格遵循系统提示中的策略文件结构和安全限制。
-2. EXECUTION_BACKEND = "event"; 必须声明 REQUIRED_FEATURES（脚本只读这些列）
-   与 handle_data(context) 入口; 可选 initialize / before_trading_start / after_trading_end。
-3. 不得定义 filter / filter_history / MATRIX_STRATEGY / ENTRY_SIGNALS / EXIT_SIGNALS。
-4. 风控（止损/止盈/持有天数）通过 META 的 STOP_LOSS / TAKE_PROFIT / MAX_HOLD_DAYS 配置,
-   不要在脚本内手写风控。
-5. 只输出 Python 代码。
-
---- 事件驱动策略契约 ---
-
-{event_guide}"""
-
     return f"""请根据以下用户输入生成完整策略代码：
 
 策略名称：{name}{id_line}

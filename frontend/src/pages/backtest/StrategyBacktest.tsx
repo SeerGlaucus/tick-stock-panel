@@ -1156,7 +1156,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
         positionSizing,
         mode: simMode,
         holdingDays,
-        minuteFill: isMinuteStrategy || detail?.execution_backend === 'event' ? false : highGranularity,
+        minuteFill: isMinuteStrategy ? false : highGranularity,
         regimeStates,
         regimeMinScore,
         params: strategyParams,
@@ -1194,15 +1194,13 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
       overrides: requestOverrides,
       mode: simMode,
       holding_days: Number(holdingDays) || 5,
-      minute_fill: isMinuteStrategy || detail?.execution_backend === 'event' ? false : highGranularity,
-      regime_filter: detail?.execution_backend === 'event'
-        ? null
-        : regimeStates.length > 0 || regimeMinScore !== ''
-          ? {
-              ...(regimeStates.length > 0 ? { states: regimeStates } : {}),
-              ...(regimeMinScore !== '' ? { min_score: Number(regimeMinScore) } : {}),
-            }
-          : null,
+      minute_fill: isMinuteStrategy ? false : highGranularity,
+      regime_filter: regimeStates.length > 0 || regimeMinScore !== ''
+        ? {
+            ...(regimeStates.length > 0 ? { states: regimeStates } : {}),
+            ...(regimeMinScore !== '' ? { min_score: Number(regimeMinScore) } : {}),
+          }
+        : null,
     })
   }
 
@@ -1427,8 +1425,6 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
   const minuteExitTriggerSupported = effectiveExitSignals.length > 0 && unsupportedMinuteExitSignals.length === 0
   // 分钟策略: 入场在盘中触发分钟成交, 日线专属的成交口径选项不适用
   const isMinuteStrategy = detail?.execution_backend === 'minute_filter'
-  // 事件驱动策略: 仅 close_t/open_t+1 成交口径, 无分钟成交/环境过滤
-  const isEventStrategy = detail?.execution_backend === 'event'
   const { data: minuteDataStatus } = useQuery({
     queryKey: QK.dataStatus,
     queryFn: api.dataStatus,
@@ -1441,9 +1437,8 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
 
   useEffect(() => {
     if (highGranularity && minuteExitTriggerSupported && !isMinuteStrategy) return
-    // 含事件策略: signal_next_minute 不支持, 统一回退收盘口径
     if (exitFill === 'signal_next_minute') setExitFill('close_t')
-  }, [exitFill, highGranularity, minuteExitTriggerSupported, isMinuteStrategy, isEventStrategy])
+  }, [exitFill, highGranularity, minuteExitTriggerSupported, isMinuteStrategy])
 
   const scoring = useMemo(() => (overrides.scoring ?? {}) as Record<string, number>, [overrides.scoring])
   const scoringDirections = useMemo(
@@ -1546,29 +1541,10 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
       {/* 配置面板 */}
       <section className="space-y-3 border-b xl:border-b-0 xl:border-r border-border bg-base/25 px-3 py-3 xl:overflow-y-auto">
         <div>
-          <div className="flex items-center justify-between gap-2 mb-1.5">
-            <div className="flex min-w-0 items-center gap-2">
-              <label className="text-xs font-medium text-secondary whitespace-nowrap">选择策略</label>
-              {/* 资产类型切换: 股票 / ETF — 与策略页一致; 分钟策略 asset_types 仅股票, ETF 列表自然不含 */}
-              <div className="inline-flex h-6 shrink-0 rounded-btn border border-border overflow-hidden">
-                {(['stock', 'etf'] as const).map(t => (
-                  <button
-                    key={t}
-                    type="button"
-                    onClick={() => { setAssetType(t); setSelectedStrategy(null); setSymbols(''); setResult(null) }}
-                    aria-pressed={assetType === t}
-                    className={`h-full px-2.5 text-[11px] font-medium transition-colors cursor-pointer ${assetType === t
-                      ? 'bg-accent/10 text-accent'
-                      : 'text-muted hover:text-secondary hover:bg-elevated'
-                    }`}
-                  >
-                    {t === 'stock' ? '股票' : 'ETF'}
-                  </button>
-                ))}
-              </div>
-            </div>
-            {/* 分钟K成交 — 日线策略专属 (分钟策略入场天然按触发分钟成交; 事件策略不支持) */}
-            {!isMinuteStrategy && !isEventStrategy && (
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="text-xs font-medium text-secondary">选择策略</label>
+            {/* 分钟K成交 — 日线策略专属 (分钟策略入场天然按触发分钟成交) */}
+            {!isMinuteStrategy && (
             <div className="flex items-center gap-1">
               <Gauge className={`h-3 w-3 ${highGranularity ? 'text-amber-400' : 'text-muted/50'}`} />
               <button
@@ -1657,9 +1633,6 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
                   }`}
               >
                 <span className="font-medium">{st.name}</span>
-                {st.execution_backend === 'event' && (
-                  <span className="ml-1 text-[8px] px-1 py-px rounded border border-violet-500/30 bg-violet-500/10 text-violet-400">事件驱动</span>
-                )}
                 {st.timeframes?.includes('1m') && (
                   <span className="ml-1 text-[8px] px-1 py-px rounded border border-sky-500/30 bg-sky-500/10 text-sky-400">分钟</span>
                 )}
@@ -1839,7 +1812,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
             >
               <option value="close_t">信号日收盘（推荐）</option>
               <option value="open_t+1">次日开盘</option>
-              {highGranularity && minuteExitTriggerSupported && !isMinuteStrategy && !isEventStrategy && (
+              {highGranularity && minuteExitTriggerSupported && !isMinuteStrategy && (
                 <option value="signal_next_minute">信号触发卖出 BETA</option>
               )}
             </select>
@@ -2012,8 +1985,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
           </div>
         </div>
 
-        {/* 市场环境过滤: 只在指定环境的交易日入场(强制 T-1, 用前一日环境判定); 事件策略 v1 不支持 */}
-        {!isEventStrategy && (
+        {/* 市场环境过滤: 只在指定环境的交易日入场(强制 T-1, 用前一日环境判定) */}
         <div className="rounded-btn border border-border bg-surface/50 px-3 py-2 space-y-1.5">
           <div className="flex items-center gap-2">
             <Gauge className="h-3.5 w-3.5 text-accent" />
@@ -2046,7 +2018,6 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
             )}
           </div>
         </div>
-        )}
 
         {result?.error && (
           <div className="text-sm text-danger bg-danger/10 border border-danger/30 rounded-btn px-3 py-2">

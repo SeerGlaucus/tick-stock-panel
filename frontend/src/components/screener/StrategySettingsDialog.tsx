@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+﻿import { useState, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Settings2, RotateCcw, Save, ChevronDown, Filter, Star, TrendingUp, Sparkles, Download, Layers, Plus, Trash2 } from 'lucide-react'
 import { api, type StrategyDetail, type StrategyParamDef, type CompositeChildInfo, type ScoringDirection } from '@/lib/api'
@@ -233,7 +233,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
         // composite 策略: 加载全部可选子策略(排除自身和其他 composite)供添加
         if (d.source === 'composite') {
           api.screenerStrategies().then(data => {
-            setAllStrategies((data.presets ?? []).filter(s => s.id !== strategyId && s.source !== 'composite' && s.execution_backend !== 'event'))
+            setAllStrategies((data.presets ?? []).filter(s => s.id !== strategyId && s.source !== 'composite'))
           }).catch(() => setAllStrategies([]))
         }
       })
@@ -568,20 +568,13 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                             className="w-16 h-6 px-1.5 rounded bg-base border border-border text-[11px] font-mono text-foreground text-center focus:outline-none focus:border-accent/50" />
                           <span className="text-[10px] text-muted">天</span>
                         </div>
-                        {detail?.execution_backend !== 'event' ? (
-                          <div className="text-[11px] text-muted pt-1 border-t border-border/10">
-                            <span className="text-secondary">入场 </span><span className="text-foreground/70">{entrySignals.length > 0 ? `${entrySignals.length} 个触发器` : '无'}</span>
-                            <span className="text-secondary ml-3">出场 </span><span className="text-foreground/70">{exitSignals.length > 0 ? `${exitSignals.length} 个触发器` : '无'}</span>
-                          </div>
-                        ) : (
-                          <div className="text-[11px] text-muted pt-1 border-t border-border/10">
-                            出入场由脚本在 handle_data 中下单决定
-                          </div>
-                        )}
+                        <div className="text-[11px] text-muted pt-1 border-t border-border/10">
+                          <span className="text-secondary">入场 </span><span className="text-foreground/70">{entrySignals.length > 0 ? `${entrySignals.length} 个触发器` : '无'}</span>
+                          <span className="text-secondary ml-3">出场 </span><span className="text-foreground/70">{exitSignals.length > 0 ? `${exitSignals.length} 个触发器` : '无'}</span>
+                        </div>
                       </div>
                     </Section>
 
-                    {detail?.execution_backend !== 'event' && (
                     <Section
                       icon={TrendingUp}
                       title="入场触发器"
@@ -592,9 +585,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                       <SignalPicker signals={entrySignals} onChange={setEntrySignals} kind="entry" options={{ variant: 'dialog' }} />
                       <div className="text-[10px] leading-4 text-muted/70">任一入场点满足即进入候选。</div>
                     </Section>
-                    )}
 
-                    {detail?.execution_backend !== 'event' && (
                     <Section
                       icon={TrendingUp}
                       title="出场触发器"
@@ -605,13 +596,10 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                       <SignalPicker signals={exitSignals} onChange={setExitSignals} kind="exit" options={{ variant: 'dialog' }} />
                       <div className="text-[10px] leading-4 text-muted/70">任一出场点满足即触发出场。</div>
                     </Section>
-                    )}
 
-                    {detail?.execution_backend !== 'event' && (
                     <div className="rounded-xl border border-amber-400/20 bg-amber-400/[0.04] px-3 py-2 text-[10px] leading-4 text-muted">
                       出入场触发器保存后对<b className="text-secondary">回测和监控</b>生效;选股扫描仍按策略本身的筛选规则,不受此影响。
                     </div>
-                    )}
 
                   </div>
                 </div>

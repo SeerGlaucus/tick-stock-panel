@@ -25,7 +25,7 @@ _SYSTEM_PREFIX = """你是A股量化策略设计专家。根据用户描述的�
 1. 只创建这一个策略文件：只生成一个 .py 文件，绝不创建多文件、不拆分模块、不跨文件引用
 2. 绝不触碰项目源码：不要写任何会修改 backend/、docs/、frontend/ 等现有文件的代码；不要 import os/sys/pathlib 等文件系统模块
 3. 不得放入内置策略目录：AI 生成的策略只属于 data/strategies/ai/，文件名/ID 用 ai_ 前缀；内置目录 backend/app/strategy/builtin/ 由项目维护，AI 不得染指
-4. polars 策略只 import polars 和 datetime；matrix_native 策略只允许 import numpy 以及 from app.backtest.matrix import 所需矩阵协议和算子；event 策略同样只 import polars 和 datetime
+4. polars 策略只 import polars 和 datetime；matrix_native 策略只允许 import numpy 以及 from app.backtest.matrix import 所需矩阵协议和算子
 
 要求:
 1. 用户可能调整的策略阈值通过 META["params"] 暴露，每项使用 id/label/type/default/min/max/step；公式常数、固定窗口边界、布尔开关不必强行参数化
@@ -47,7 +47,6 @@ _FENCED_CODE_RE = re.compile(
 )
 _POLARS_ENTRYPOINT_ERROR = "找不到策略入口函数 filter() 或 filter_history()"
 _MATRIX_ENTRYPOINT_ERROR = "找不到 Matrix 策略入口 MATRIX_STRATEGY"
-_EVENT_ENTRYPOINT_ERROR = "找不到事件策略入口函数 handle_data()"
 
 _POLARS_SCORING_FIELDS = frozenset(
     name
@@ -122,13 +121,6 @@ def _strategy_entrypoint_error(code: str, meta: dict | None = None) -> str | Non
     tree = ast.parse(code)
     if _strategy_execution_backend(tree, meta) == "matrix_native":
         return None if _top_level_assignment(tree, "MATRIX_STRATEGY") else _MATRIX_ENTRYPOINT_ERROR
-    if _strategy_execution_backend(tree, meta) == "event":
-        has_event_entrypoint = any(
-            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name == "handle_data"
-            for node in tree.body
-        )
-        return None if has_event_entrypoint else _EVENT_ENTRYPOINT_ERROR
     has_polars_entrypoint = any(
         isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         and node.name in {"filter", "filter_history"}
@@ -246,7 +238,6 @@ class AIStrategyGenerator:
         return error.startswith("解析META失败:") or error in {
             _POLARS_ENTRYPOINT_ERROR,
             _MATRIX_ENTRYPOINT_ERROR,
-            _EVENT_ENTRYPOINT_ERROR,
         } or error.startswith(("META.params", "META.scoring"))
 
     @staticmethod
@@ -294,12 +285,6 @@ class AIStrategyGenerator:
             entrypoint_requirement = (
                 '保留 EXECUTION_BACKEND = "matrix_native"，定义 MATRIX_STRATEGY，'
                 "不得添加 filter() 或 filter_history()"
-            )
-        elif backend == "event":
-            entrypoint_requirement = (
-                '保留 EXECUTION_BACKEND = "event"，定义 handle_data(context)，'
-                "必须声明 REQUIRED_FEATURES；不得添加 filter()/filter_history()/"
-                "MATRIX_STRATEGY/ENTRY_SIGNALS/EXIT_SIGNALS"
             )
         else:
             entrypoint_requirement = (

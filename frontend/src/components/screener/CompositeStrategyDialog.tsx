@@ -56,8 +56,8 @@ export function CompositeStrategyDialog({ open, onClose, onSavedId, editStrategy
     setLoadingList(true)
     api.screenerStrategies()
       .then(data => {
-        // 排除 composite 策略(不能嵌套)与事件驱动策略(仅回测, 不产生横截面信号)
-        setAvailable((data.presets ?? []).filter(s => s.source !== 'composite' && s.execution_backend !== 'event'))
+        // 排除 composite 策略(不能嵌套)
+        setAvailable((data.presets ?? []).filter(s => s.source !== 'composite'))
       })
       .catch(() => setAvailable([]))
       .finally(() => setLoadingList(false))

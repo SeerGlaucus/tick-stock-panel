@@ -124,8 +124,6 @@ export function Screener() {
   const [expiredCounts, setExpiredCounts] = useState<Record<string, number>>({})
   // 各策略显示上限 (null = 全部)
   const [strategyLimits, setStrategyLimits] = useState<Record<string, number | null>>({})
-  // 策略视图: 信号驱动 (选股/监控/回测) / 事件驱动 (仅回测)
-  const [viewMode, setViewMode] = useState<'signal' | 'event'>('signal')
 
   // 筛选条件变化时同步到 map（供切换策略时读取最新值）
   useEffect(() => {
@@ -193,17 +191,8 @@ export function Screener() {
     if (latest) setAsOf(latest)
   }, [dataStatus.data?.enriched?.latest_date])
 
-  // 信号策略与事件策略分流: 事件策略仅回测, 不进池/不参与 run-all/不可监控。
   const strategyPresets = useMemo(
-    () => (strategies.data?.presets ?? []).filter(
-      s => s.asset_types.includes(assetType) && s.execution_backend !== 'event'
-    ),
-    [strategies.data, assetType],
-  )
-  const eventPresets = useMemo(
-    () => (strategies.data?.presets ?? []).filter(
-      s => s.asset_types.includes(assetType) && s.execution_backend === 'event'
-    ),
+    () => (strategies.data?.presets ?? []).filter(s => s.asset_types.includes(assetType)),
     [strategies.data, assetType],
   )
 
@@ -668,22 +657,6 @@ export function Screener() {
         subtitle="基于本地 enriched 表 · 毫秒级 SQL"
         right={
           <div className="flex items-center gap-2">
-            {/* 策略视图: 信号驱动 / 事件驱动 (事件策略仅回测) */}
-            <div className="flex items-center h-7 rounded-btn border border-border overflow-hidden">
-              {(['signal', 'event'] as const).map(m => (
-                <button
-                  key={m}
-                  onClick={() => setViewMode(m)}
-                  className={`h-full px-2.5 text-xs font-medium transition-colors
-                    cursor-pointer ${viewMode === m
-                      ? 'bg-accent/10 text-accent'
-                      : 'text-muted hover:text-secondary hover:bg-elevated'
-                    }`}
-                >
-                  {m === 'signal' ? '信号驱动' : '事件驱动'}
-                </button>
-              ))}
-            </div>
             {/* 资产类型切换: 股票 / ETF (分钟策略 asset_types 仅股票, ETF 列表自然不含) */}
             <div className="flex items-center h-7 rounded-btn border border-border overflow-hidden">
               {(['stock', 'etf'] as const).map(t => (
@@ -822,38 +795,6 @@ export function Screener() {
         {/* 策略卡片 */}
         {cardSize !== 'hidden' && (
         <section>
-          {viewMode === 'event' ? (
-            <>
-              {strategies.isLoading && <div className="text-sm text-muted">加载中…</div>}
-              {!strategies.isLoading && eventPresets.length === 0 && (
-                <div className="text-sm text-muted py-4 text-center border border-dashed border-border rounded-btn">
-                  暂无事件驱动策略 — 可在「创建策略 · AI」中选择事件驱动后端创建
-                </div>
-              )}
-              <div className={cardWrapCls(cardSize)}>
-                {eventPresets.map(s => (
-                  <StrategyCard
-                    key={s.id}
-                    name={s.name}
-                    description={s.description}
-                    source={s.source}
-                    active={false}
-                    loading={false}
-                    cardSize={cardSize}
-                    onRun={() => {}}
-                    disabled={false}
-                    onSettings={() => setSettingsStrategyId(s.id)}
-                    eventMode
-                  />
-                ))}
-              </div>
-              <div className="text-[11px] text-muted leading-5">
-                事件驱动策略按交易日执行脚本并自主下单, 不产生当日命中列表;
-                请前往「回测」页选择该策略验证。
-              </div>
-            </>
-          ) : (
-            <>
           {strategies.isLoading && <div className="text-sm text-muted">加载中…</div>}
           {!strategies.isLoading && displayPool.length === 0 && (
             <div className="text-sm text-muted py-4 text-center border border-dashed border-border rounded-btn">
@@ -887,13 +828,10 @@ export function Screener() {
               )
             })}
           </div>
-          </>
-          )}
         </section>
         )}
 
-        {/* 结果 (仅信号驱动视图) */}
-        {viewMode === 'signal' && (
+        {/* 结果 */}
         <section>
           {run.isError && (
             <div className="text-sm text-danger bg-danger/10 border border-danger/30 rounded-btn px-3 py-2">
@@ -1086,7 +1024,6 @@ export function Screener() {
             </div>
           )}
         </section>
-        )}
       </div>
 
       <ListColumnCustomizer

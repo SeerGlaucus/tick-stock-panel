@@ -207,13 +207,6 @@ class StrategyDef:
     # 仅 minute_filter: META["daily_history_bars"] 声明需要的日线历史窗口 (0=不需要;
     # >0 时 filter_minute_history 必须接受 daily 关键字, 引擎注入 context.daily_history)
     minute_daily_bars: int = 0
-    # 仅 backend=="event" 时非空: 事件驱动回测 (日频) 的回调函数。
-    initialize_fn: Callable[[Any], None] | None = None
-    handle_data_fn: Callable[[Any], None] | None = None
-    before_trading_start_fn: Callable[[Any], None] | None = None
-    after_trading_end_fn: Callable[[Any], None] | None = None
-    # 仅 event: META["history_bars"] 声明的最大历史窗口交易日数 (默认 60)。
-    event_history_bars: int = 60
 
 
 @dataclass
@@ -487,10 +480,6 @@ class StrategyEngine:
         filter_fn = getattr(mod, "filter", None)
         filter_history_fn = getattr(mod, "filter_history", None)
         filter_minute_history_fn = getattr(mod, "filter_minute_history", None)
-        initialize_fn = getattr(mod, "initialize", None)
-        handle_data_fn = getattr(mod, "handle_data", None)
-        before_trading_start_fn = getattr(mod, "before_trading_start", None)
-        after_trading_end_fn = getattr(mod, "after_trading_end", None)
         execution_backend = str(
             getattr(
                 mod,
@@ -501,7 +490,7 @@ class StrategyEngine:
                 ),
             )
         )
-        valid_backends = {"polars_expr", "matrix_native", "python_history_legacy", "composite", "minute_filter", "event"}
+        valid_backends = {"polars_expr", "matrix_native", "python_history_legacy", "composite", "minute_filter"}
         if execution_backend not in valid_backends:
             raise ValueError(
                 f"unsupported execution backend {execution_backend!r}; "
@@ -511,7 +500,6 @@ class StrategyEngine:
         matrix_strategy = getattr(mod, "MATRIX_STRATEGY", None)
         composite_spec: CompositeSpec | None = None
         minute_daily_bars = 0
-        event_history_bars = 60
         if execution_backend == "matrix_native":
             from app.backtest.matrix import MatrixStrategy
 
@@ -570,39 +558,6 @@ class StrategyEngine:
                         "minute_filter daily_history_bars requires "
                         "filter_minute_history to accept a 'daily' keyword"
                     )
-        elif execution_backend == "event":
-            # 事件驱动策略 (日频回测): 必须声明 handle_data 与 REQUIRED_FEATURES;
-            # 不声明横截面 filter / 信号列表 / 矩阵策略; timeframes 必含 1d。
-            if handle_data_fn is None:
-                raise ValueError("event strategy must declare handle_data")
-            if (
-                filter_fn is not None
-                or filter_history_fn is not None
-                or filter_minute_history_fn is not None
-                or matrix_strategy is not None
-            ):
-                raise ValueError(
-                    "event strategy must not declare filter, filter_history, "
-                    "filter_minute_history or MATRIX_STRATEGY"
-                )
-            if "1d" not in meta.get("timeframes", []):
-                raise ValueError(
-                    "event strategy must declare timeframes containing '1d'"
-                )
-            if getattr(mod, "ENTRY_SIGNALS", None) or getattr(mod, "EXIT_SIGNALS", None):
-                raise ValueError(
-                    "event strategy must not declare ENTRY_SIGNALS or EXIT_SIGNALS"
-                )
-            declared_features = set(meta.get("required_features", []) or []) | set(
-                getattr(mod, "REQUIRED_FEATURES", []) or []
-            )
-            if not declared_features:
-                raise ValueError("event strategy must declare REQUIRED_FEATURES")
-            if "history_bars" in meta:
-                # 显式声明的 0 不落入默认值: 事件策略必须有历史窗口, [1, 500] 硬界。
-                event_history_bars = int(meta["history_bars"] or 0)
-                if not 0 < event_history_bars <= 500:
-                    raise ValueError("event strategy history_bars must be within [1, 500]")
         elif filter_history_fn is None or filter_fn is not None:
             raise ValueError("python_history_legacy strategy must declare only filter_history")
 
@@ -628,11 +583,6 @@ class StrategyEngine:
             composite=composite_spec,
             filter_minute_history_fn=filter_minute_history_fn,
             minute_daily_bars=minute_daily_bars,
-            initialize_fn=initialize_fn,
-            handle_data_fn=handle_data_fn,
-            before_trading_start_fn=before_trading_start_fn,
-            after_trading_end_fn=after_trading_end_fn,
-            event_history_bars=event_history_bars,
         )
 
     def reload(self) -> None:
@@ -942,11 +892,6 @@ class StrategyEngine:
         t0 = time.perf_counter()
 
         s = self.get(strategy_id)
-        if s.execution_backend == "event":
-            # 事件驱动策略不产生横截面信号: 只能回测, 不能进选股/监控运行路径。
-            raise ValueError(
-                f"策略 {strategy_id} 是事件驱动策略, 仅支持回测验证, 不支持选股运行"
-            )
         self.validate_context(s, context)
         as_of = context.as_of
         overrides = overrides or {}
@@ -1182,14 +1127,6 @@ class StrategyEngine:
         params_map = params_map or {}
         overrides_map = overrides_map or {}
         selected_ids = list(self._strategies) if strategy_ids is None else strategy_ids
-        if strategy_ids is None:
-            # 事件驱动策略不产生横截面信号: 默认"跑全部"只覆盖可运行策略。
-            # 显式传入 strategy_ids 时保持 fail-closed, 由 run 对 event 拒绝。
-            selected_ids = [
-                sid
-                for sid in selected_ids
-                if self._strategies[sid].execution_backend != "event"
-            ]
         selected = [(sid, self.get(sid)) for sid in selected_ids]
         for _, strategy in selected:
             self.validate_context(strategy, context)

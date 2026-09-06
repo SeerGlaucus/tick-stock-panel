@@ -87,9 +87,8 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
   )
   const invalidPoolCount = draftPool.length - validDraft.length
 
-  // 事件驱动策略仅回测, 不进入信号策略池。
   const available = useMemo(
-    () => allStrategies.filter(s => !s.research_only && !draftPool.includes(s.id) && s.execution_backend !== 'event'),
+    () => allStrategies.filter(s => !s.research_only && !draftPool.includes(s.id)),
     [allStrategies, draftPool]
   )
 
